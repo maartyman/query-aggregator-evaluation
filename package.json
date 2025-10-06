@@ -1,0 +1,23 @@
+{
+  "name": "query-aggregator-evaluation",
+  "version": "1.0.0",
+  "description": "Evaluation of the query aggregator using a watch party and elevate use-case.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "start": "node ./dist/main.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@inrupt/solid-client-authn-core": "^3.1.0",
+    "@comunica/query-sparql": "4.4.1",
+    "asynciterator": "^3.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}

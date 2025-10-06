@@ -1,0 +1,25 @@
+{
+    "test-experiment-1": {
+        "type": "watchparty-overview-page",
+        "iterations": [
+            {
+                "iterationName": "number-of-joined-watchparties",
+                "args": [[1], [2], [3]]
+            }
+        ]
+
+    },
+    "test-experiment-2": {
+        "type": "watchparty-watch-page",
+        "iterations": [
+            {
+                "iterationName": "changing-number-of-members",
+                "args": [[1, 1], [2, 1], [3, 1]]
+            },
+            {
+                "iterationName": "changingNumberOfMessagesPerMember",
+                "args": [[1, 1], [1, 2], [1, 3]]
+            }
+        ]
+    }
+}

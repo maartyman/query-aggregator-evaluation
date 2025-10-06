@@ -1,0 +1,12 @@
+{
+    "test-experiment-1": {
+        "type": "watchparty-overview-page",
+        "iterations": [
+            {
+                "iterationName": "numberOfJoinedWatchparties",
+                "args": [[1], [2], [3]]
+            }
+        ]
+
+    }
+}
