@@ -27,8 +27,48 @@ WHERE {
 const queryPerson = `PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name
 WHERE {
-    $creator$ foaf:name ?name .
+    ?creator foaf:name ?name .
 }`;
+
+const prefixes = `
+@prefix trans: <http://localhost:5000/config/transformations#> .
+@prefix fno: <https://w3id.org/function/ontology#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+`;
+
+const fnoConfRoom = `${prefixes}
+_:MessageLocationsQuery
+    a fno:Execution ;
+    fno:executes trans:SPARQLEvaluation ;
+    trans:queryString """${queryRoom}"""^^xsd:string ;
+    trans:sources ( "$room$"^^xsd:string ) .
+`;
+
+const fnoConfMessages = `${prefixes}
+_:MessageLocationsResultsSource
+    a trans:SPARQLQueryResultSource ;
+    trans:sparqlQueryResult <$MessageLocationsQueryResultLocation$> ;
+    trans:extractVariables ( "messageBoxUrl" ) .
+
+_:MessageBoxesQuery
+    a fno:Execution ;
+    fno:executes trans:SPARQLEvaluation ;
+    trans:queryString """${queryMessages}"""^^xsd:string ;
+    trans:sources ( _:MessageLocationsResultsSource ) .
+`;
+
+const fnoConfPerson = `${prefixes}
+_:MessageBoxesResultsSource
+    a trans:SPARQLQueryResultSource ;
+    trans:sparqlQueryResult <$MessageBoxes$> ;
+    trans:extractVariables ( "creator" ) .
+
+_:RoomsQuery
+    a fno:Execution ;
+    fno:executes trans:SPARQLEvaluation ;
+    trans:queryString """${queryPerson}"""^^xsd:string ;
+    trans:sources ( _:MessageBoxesResultsSource ) .
+`;
 
 async function runQueriesInWorker(podName: string, room: string, linkTraversalMethod: LinkTraversalMethod): Promise<ExperimentResult> {
   const auth = new Auth(podName);

@@ -60,6 +60,6 @@ export async function startServers(
   await new Promise(resolve => setTimeout(resolve, 15000));
   console.log("Starting aggregator...");
   exec(`cd ${aggregatorLocation} && go run . --webid http://localhost:3000/${queryUser}/profile/card#me --email ${queryUser}@example.org --password password --log-level error`);
-  console.log("waiting 2 seconds for servers to start...");
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  console.log("waiting 3 seconds for servers to start...");
+  await new Promise(resolve => setTimeout(resolve, 3000));
 }

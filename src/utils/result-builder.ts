@@ -130,12 +130,8 @@ export class ExperimentResult {
     const endTime = process.hrtime(startTime);
     const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
 
-    if (!Array.isArray(jsonResult)) {
-      throw new Error('JSON result is not an array.');
-    }
-
     const timestamps: [number,number][] = [];
-    for (let i = 0; i < jsonResult.length; i++) {
+    for (let i = 0; i < jsonResult.results.bindings.length; i++) {
       timestamps.push(endTime);
     }
 

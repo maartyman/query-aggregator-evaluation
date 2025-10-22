@@ -1,5 +1,6 @@
 import {createDpopHeader, generateDpopKeyPair, KeyPair} from "@inrupt/solid-client-authn-core";
 import {EventEmitter} from "node:events";
+import { fetch } from 'cross-fetch';
 
 export class Auth {
   private readonly podName: string;
@@ -159,7 +160,7 @@ export class Auth {
     return await this.throttledFetch(input, init);
   }
 
-  async sse(input: string): Promise<EventEmitter> {
+  async sse(input: string, abortController: AbortController): Promise<EventEmitter> {
     const response = await fetch(input, {
       method: 'GET',
       headers: {
@@ -172,7 +173,7 @@ export class Auth {
       param => param.split('=').map(s => s.replace(/"/g, ''))
     ));
 
-    const serviceEndpoint = response.headers.get("Link")?.match(/<([^>]+)>;\s*rel="service_token_endpoint"/)?.[1];
+    const serviceEndpoint = response.headers.get("Link")?.match(/<([^>]+)>;\s*rel="service-token-endpoint"/)?.[1];
 
     const uma2ConfigResponse = await fetch(`${as_uri}/.well-known/uma2-configuration`);
     if (!uma2ConfigResponse.ok) {
@@ -191,7 +192,6 @@ export class Auth {
     if (!asRequestResponse.ok) {
       throw new Error('cannot retrieve access token' + await asRequestResponse.text());
     }
-
     const asResponse: any = await asRequestResponse.json();
 
     const serviceTokenResponse = await fetch(serviceEndpoint!, {
@@ -201,31 +201,32 @@ export class Auth {
         'Authorization': `${asResponse.token_type} ${asResponse.access_token}`
       },
       body: JSON.stringify({
-        "resource_url": input,
-        "resource_scopes": ["urn:example:css:modes:continuous:read"]
+        resource_url: input
       }),
     });
-
     if (!serviceTokenResponse.ok) {
       throw new Error('cannot retrieve service token: ' + await serviceTokenResponse.text());
     }
+    const serviceTokenJson = await serviceTokenResponse.json();
 
     const ee = new EventEmitter();
-
-    const serviceTokenJson = await serviceTokenResponse.json();
-    console.log("serviceTokenJson: ", JSON.stringify(serviceTokenJson))
-
     const authenticatedResponse = await fetch(input, {
       method: 'GET',
       headers: {
         'Accept': 'text/event-stream',
-        'Authorization': `Bearer ${serviceTokenJson.access_token}`
+        'Cache-Control': 'no-cache',
+        'Authorization': `Bearer ${serviceTokenJson.service_token}`
       },
+      signal: abortController.signal,
     });
-    const nodeStream = authenticatedResponse.body as any;
+
+    if (!authenticatedResponse.ok || !authenticatedResponse.body) {
+      throw new Error(`cannot connect to SSE (status: ${authenticatedResponse.status}):` + await authenticatedResponse.text());
+    }
+
     let buffer = '';
     let currentEventType = '';
-
+    const nodeStream = authenticatedResponse.body as any;
     nodeStream.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');

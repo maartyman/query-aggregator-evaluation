@@ -51,7 +51,10 @@ async function runExperiment(experimentName: string, experimentConfig: any) {
     experimentLocation,
     query_user
   );
+
   await experiment.setupAggregators();
+
+  await experiment.run(false, 3);
 
   await experiment.run(true, 1);
 
@@ -65,6 +68,8 @@ runExperiment("test-experiment-1", {
       "iterationName": "number-of-joined-watchparties",
       "args": [
         [1],
+        [5],
+        [10],
       ]
     }
   ]

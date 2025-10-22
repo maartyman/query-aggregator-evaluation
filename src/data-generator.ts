@@ -9,7 +9,7 @@ export class DataGenerator {
   protected podProviderUrl;
   protected experimentConfig;
   protected outputDirectory;
-  private pipelineEndpoint = 'http://localhost:5000/config/actors';
+  private aggregatorUrl = 'http://localhost:5000/';
   protected aggregatorIdStore= new Map<string, string>();
 
   constructor(outputDirectory: string, experimentConfig: any, podProviderUrl: string) {
@@ -19,7 +19,7 @@ export class DataGenerator {
   }
 
   protected async createAggregatorService(auth: Auth, FnoDescription: string): Promise<string> {
-    const response = await auth.fetch(this.pipelineEndpoint, {
+    const response = await auth.fetch(`${this.aggregatorUrl}config/actors`, {
       method: "POST",
       headers: {
         "content-type": "text/turtle"
@@ -33,8 +33,11 @@ export class DataGenerator {
   }
 
   protected async getAggregatorService(auth: Auth, serviceId: string): Promise<any> {
-    const response = await auth.fetch(`${this.pipelineEndpoint}/${serviceId}/`, {
-      method: "GET"
+    const response = await auth.fetch(`${this.aggregatorUrl}/${serviceId}/`, {
+      method: "GET",
+      headers: {
+        "Accept": "application/sparql-results+json"
+      }
     });
     if (!response.ok) {
       throw new Error(`Failed to get aggregator: ${await response.text()}`);
@@ -44,29 +47,35 @@ export class DataGenerator {
 
   protected async waitForAggregatorService(auth: Auth, serviceId: string): Promise<void> {
     return new Promise(async (resolve, reject) => {
+      const serviceUrl = `http://localhost:5000/${serviceId}/events`;
       let sse: undefined | EventEmitter = undefined;
+      const abortController = new AbortController();
       while (sse === undefined) {
+        await new Promise(r => setTimeout(r, 2000));
         try {
-          sse = await auth.sse(serviceId);
+          sse = await auth.sse(serviceUrl, abortController);
         } catch (e) {
-          console.log(`Aggregator service ${serviceId} not yet available, retrying...`);
+          console.log(`Aggregator service ${serviceUrl} not yet available, retrying...`);
+          console.error(e);
           sse = undefined;
-          await new Promise(r => setTimeout(r, 500));
         }
       }
       sse!.on("message", (message) => {
         if (message.eventType === "up-to-date") {
-          console.log(`Aggregator service ${serviceId} is up-to-date.`);
+          console.log(`Aggregator service ${serviceUrl} is up-to-date.`);
           resolve();
+          abortController.abort();
         }
       });
 
       sse!.on("end", () => {
-        reject(new Error(`Aggregator service ${serviceId} stream ended before reaching up-to-date state.`));
+        abortController.abort();
+        reject(new Error(`Aggregator service ${serviceUrl} stream ended before reaching up-to-date state.`));
       });
 
       sse!.on("error", (error) => {
-        reject(new Error(`Error while waiting for aggregator service ${serviceId}: ${error.message}`));
+        abortController.abort();
+        reject(new Error(`Error while waiting for aggregator service ${serviceUrl}: ${error.message}`));
       });
     });
   }

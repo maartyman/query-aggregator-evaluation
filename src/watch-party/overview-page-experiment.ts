@@ -241,14 +241,14 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     // start second aggregator with message boxes query passing in the result of the first
     const messageBoxesId = await this.createAggregatorService(auth, fnoConfMessageBoxes.replace(
       "$MessageLocationsQueryResultLocation$",
-      `http://localhost:4000/${messageLocationsId}/`
+      `http://localhost:5000/${messageLocationsId}/`
     ));
     await this.waitForAggregatorService(auth, messageBoxesId);
 
     // start third aggregator with rooms query passing in the result of the second
     this.aggregatorIdStore.set(podName, await this.createAggregatorService(auth, fnoConfRooms.replace(
       "$MessageBoxesQueryResultLocation$",
-      `http://localhost:4000/${messageBoxesId}/`
+      `http://localhost:5000/${messageBoxesId}/`
     )));
     await this.waitForAggregatorService(auth, messageBoxesId);
   }
