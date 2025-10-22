@@ -12,12 +12,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@inrupt/solid-client-authn-core": "^3.1.0",
     "@comunica/query-sparql": "4.4.1",
-    "asynciterator": "^3.10.0"
+    "@inrupt/solid-client-authn-core": "^3.1.0",
+    "asynciterator": "^3.10.0",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.2"
   }
 }

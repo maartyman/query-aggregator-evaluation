@@ -89,13 +89,11 @@ export class ExperimentResult {
 
     return new Promise((resolve, reject) => {
       resultIterator.on('data', (binding: any) => {
-        console.log(`Received result: ${JSON.stringify(binding.toString())}`);
         const relativeTime = process.hrtime(startTime);
         timestamps.push(relativeTime);
       });
 
       resultIterator.on('end', () => {
-        console.log(`Iterator ended, collected ${timestamps.length} timestamps.`);
         const endTime = process.hrtime(startTime);
         const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
 
@@ -119,6 +117,41 @@ export class ExperimentResult {
         reject(error);
       });
     });
+  }
+
+  /**
+   * Create ExperimentResult from fetching a json result
+   */
+  public static fromJson(
+    experimentId: string,
+    startTime: [number, number],
+    jsonResult: any
+  ): ExperimentResult {
+    const endTime = process.hrtime(startTime);
+    const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
+
+    if (!Array.isArray(jsonResult)) {
+      throw new Error('JSON result is not an array.');
+    }
+
+    const timestamps: [number,number][] = [];
+    for (let i = 0; i < jsonResult.length; i++) {
+      timestamps.push(endTime);
+    }
+
+    if (timestamps.length === 0) {
+      throw new Error('No results received from JSON result.');
+    }
+
+    return new ExperimentResult(
+      experimentId,
+      totalDuration,
+      this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
+      this.calculateDiefficiency(timestamps, [1,0]), // 1s
+      this.calculateDiefficiency(timestamps, [10,0]), // 10s
+      timestamps,
+      timestamps.length
+    );
   }
 
   private static calculateDiefficiency(timestamps: [number,number][], timeMs: [number,number]): number {

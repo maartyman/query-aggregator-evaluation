@@ -1,11 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import {Auth} from "./utils/auth";
+import WebSocket from 'ws';
+import {EventEmitter} from "node:events";
 
 export class DataGenerator {
   protected podProviderUrl;
   protected experimentConfig;
   protected outputDirectory;
+  private pipelineEndpoint = 'http://localhost:5000/config/actors';
+  protected aggregatorIdStore= new Map<string, string>();
 
   constructor(outputDirectory: string, experimentConfig: any, podProviderUrl: string) {
     this.podProviderUrl = podProviderUrl;
@@ -13,7 +18,60 @@ export class DataGenerator {
     this.outputDirectory = outputDirectory;
   }
 
-  public generateMetaData() {
+  protected async createAggregatorService(auth: Auth, FnoDescription: string): Promise<string> {
+    const response = await auth.fetch(this.pipelineEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "text/turtle"
+      },
+      body: FnoDescription,
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to configure aggregator: ${await response.text()}`);
+    }
+    return (await response.json()).id;
+  }
+
+  protected async getAggregatorService(auth: Auth, serviceId: string): Promise<any> {
+    const response = await auth.fetch(`${this.pipelineEndpoint}/${serviceId}/`, {
+      method: "GET"
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to get aggregator: ${await response.text()}`);
+    }
+    return await response.json();
+  }
+
+  protected async waitForAggregatorService(auth: Auth, serviceId: string): Promise<void> {
+    return new Promise(async (resolve, reject) => {
+      let sse: undefined | EventEmitter = undefined;
+      while (sse === undefined) {
+        try {
+          sse = await auth.sse(serviceId);
+        } catch (e) {
+          console.log(`Aggregator service ${serviceId} not yet available, retrying...`);
+          sse = undefined;
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+      sse!.on("message", (message) => {
+        if (message.eventType === "up-to-date") {
+          console.log(`Aggregator service ${serviceId} is up-to-date.`);
+          resolve();
+        }
+      });
+
+      sse!.on("end", () => {
+        reject(new Error(`Aggregator service ${serviceId} stream ended before reaching up-to-date state.`));
+      });
+
+      sse!.on("error", (error) => {
+        reject(new Error(`Error while waiting for aggregator service ${serviceId}: ${error.message}`));
+      });
+    });
+  }
+
+  protected generateMetaData() {
     const internalDir = path.join(this.outputDirectory, '.internal');
     const accountsDir = path.join(internalDir, 'accounts');
     const idpKeysDir = path.join(internalDir, 'idp/keys');

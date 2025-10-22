@@ -3,6 +3,26 @@ import * as path from 'path';
 import {OverviewPageExperiment} from "./watch-party/overview-page-experiment";
 import {WatchPageExperiment} from "./watch-party/watch-page-experiment";
 
+process.stdin.resume();
+
+function exitHandler() {
+  //stopServers();
+  process.exit();
+}
+
+// do something when app is closing
+process.on('exit', exitHandler);
+
+// catches ctrl+c event
+process.on('SIGINT', exitHandler);
+
+// catches "kill pid" (for example: nodemon restart)
+process.on('SIGUSR1', exitHandler);
+process.on('SIGUSR2', exitHandler);
+
+// catches uncaught exceptions
+process.on('uncaughtException', exitHandler);
+
 async function runExperiment(experimentName: string, experimentConfig: any) {
   const experimentLocation = path.resolve(`./experiment-data/${experimentName}`);
   // generate the data
@@ -12,7 +32,7 @@ async function runExperiment(experimentName: string, experimentConfig: any) {
       experiment = new OverviewPageExperiment(experimentLocation, experimentConfig);
       break;
     case "watchparty-watch-page":
-      experiment = new WatchPageExperiment(experimentLocation, experimentConfig);
+      //experiment = new WatchPageExperiment(experimentLocation, experimentConfig);
       break;
     default:
       throw new Error(`Unknown experiment type: ${experimentConfig.type}`);
@@ -21,24 +41,23 @@ async function runExperiment(experimentName: string, experimentConfig: any) {
     throw new Error(`Could not create experiment of type: ${experimentConfig.type}`);
   }
   // generate the data
-/*
-  experiment.generate();
+  const query_user = experiment.generate();
   // start the servers
-  let servers = await startServers(
+
+  await startServers(
     "/home/maarten/Documents/doctoraat/code/original-uma/packages/uma",
     "/home/maarten/Documents/doctoraat/code/original-uma/packages/css",
-    experimentLocation
-  );*/
+    "/home/maarten/Documents/doctoraat/code/aggregator",
+    experimentLocation,
+    query_user
+  );
+  await experiment.setupAggregators();
 
-  // warmup
-  await experiment.run(false, 2);
-  // run the actual experiment
   await experiment.run(true, 1);
 
-  //await stopServers(servers);
+  stopServers();
 }
 
-/*
 runExperiment("test-experiment-1", {
   "type": "watchparty-overview-page",
   "iterations": [
@@ -46,28 +65,28 @@ runExperiment("test-experiment-1", {
       "iterationName": "number-of-joined-watchparties",
       "args": [
         [1],
-        [2],
-        [4],
-        [8],
-        [16],
-        [32],
       ]
     }
   ]
+}).then(() => {
+  console.log("Experiment completed");
+}).catch((error) => {
+  console.error("Experiment failed: ", error);
 });
-*/
 
+/*
 runExperiment("test-experiment-2", {
   "type": "watchparty-watch-page",
   "iterations": [
     {
       "iterationName": "number-of-joined-watchparties",
       "args": [
-        [1, 1],
-        [2, 2],
-        [4, 4],
+      // [ numberOfMembers, numberOfMessagesPerMember ]
+        [10, 1],
+        [50, 1],
+        [100, 1],
       ]
     }
   ]
 });
-
+*/

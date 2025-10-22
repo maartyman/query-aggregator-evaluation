@@ -1,7 +1,7 @@
 import {LinkTraversalMethod, WatchpartyDataGenerator} from "./generate-data-watchparty";
 import * as fs from "node:fs";
 import path from "node:path";
-import {Auth} from "../auth";
+import {Auth} from "../utils/auth";
 import {QueryEngine} from "@comunica/query-sparql";
 import {isMainThread, parentPort, Worker, workerData} from 'worker_threads';
 import {UnionIterator} from "asynciterator";
@@ -46,37 +46,33 @@ async function runQueriesInWorker(podName: string, room: string, linkTraversalMe
   const creators = new Set();
   let resultIterator;
   if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
-      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.map(
+      (bindings) => {
         let messageboxUrl = bindings.get('messageBoxUrl')!.value;
-        console.log(`Querying for message box ${messageboxUrl}`);
-        push(engine.queryBindings(
+        return engine.queryBindings(
           queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
           {
             sources: [messageboxUrl],
             fetch: auth.fetch.bind(auth)
-          }));
-        done();
+          }
+        );
       },
-    })).transform({
-      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+    )).map(
+      (bindings) => {
         const creator = bindings.get('creator')!.value;
         if (creators.has(creator)) {
-          return done();
+          return null;
         }
         creators.add(creator);
-        console.log(`Querying for creator ${creator}`);
-        push(engine.queryBindings(
+        return engine.queryBindings(
           queryPerson.replace(/\$creator\$/g, `<${creator}>`),
           {
             sources: [creator],
             fetch: auth.fetch.bind(auth)
           }
-        ));
-        done();
+        );
       },
-    })
-    );
+    )).filter((it) => it !== null);
   } else {
     resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
         transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
@@ -111,20 +107,24 @@ async function runQueriesInWorker(podName: string, room: string, linkTraversalMe
   }
 
   return await ExperimentResult.fromIterator(
-    podName,
+    podName+"_"+linkTraversalMethod,
     startTime,
     resultIterator
   );
 }
 
 export class WatchPageExperiment extends WatchpartyDataGenerator implements Experiment {
-  generate(): void {
+  generate(): string {
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
         this.generateForWatchPage(iteration.iterationName+"-"+arg.join("_"), arg[0], arg[1]);
       }
     }
     this.generateMetaData();
+    return this.getUserPodRelativePath(
+      this.queryUser,
+      this.experimentConfig.iterations[0].iterationName+"-"+this.experimentConfig.iterations[0].args[0].join("_")
+    );
   }
 
   async run(saveResults: boolean, iterations: number): Promise<void> {
@@ -163,7 +163,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
               worker.on('exit', (code) => {
                 if (code !== 0) {
-                  console.error(`Worker stopped with exit code ${code}`);
+                  //console.error(`Worker ${workerName} stopped with exit code ${code}`);
                 }
               });
             });
@@ -280,6 +280,10 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
       fs.mkdirSync(path.dirname(messageBoxFilePath), { recursive: true });
       fs.writeFileSync(messageBoxFilePath, messageBoxTriples);
     }
+  }
+
+  setupAggregators(): Promise<void> {
+    return Promise.resolve(undefined);
   }
 }
 
