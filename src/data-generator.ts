@@ -1,106 +1,225 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
-import {Auth} from "./utils/auth";
-import WebSocket from 'ws';
-import {EventEmitter} from "node:events";
+import {randomUUID} from 'crypto';
+
+export interface ServerDistributionOptions {
+  podsPerServer?: number;
+  solidPortBase?: number;
+  umaPortBase?: number;
+}
+
+export interface ServerInstanceContext {
+  index: number;
+  solidPort: number;
+  umaPort: number;
+  relativePath: string;
+  absolutePath: string;
+  solidBaseUrl: string;
+  umaBaseUrl: string;
+}
+
+export interface PodContext {
+  name: string;
+  relativePath: string;
+  absolutePath: string;
+  baseUrl: string;
+  webId: string;
+  email: string;
+  server: ServerInstanceContext;
+}
+
+export interface ExperimentSetup {
+  queryUser: PodContext;
+  servers: ServerInstanceContext[];
+}
+
+function parsePositiveInteger(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return undefined;
+    }
+    value = parsed;
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  return undefined;
+}
+
+function parseNonNegativeInteger(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return undefined;
+    }
+    value = parsed;
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  return undefined;
+}
 
 export class DataGenerator {
-  protected podProviderUrl;
-  protected experimentConfig;
-  protected outputDirectory;
-  private aggregatorUrl = 'http://localhost:5000/';
-  protected aggregatorIdStore= new Map<string, string>();
+  protected readonly experimentConfig: any;
+  protected readonly outputDirectory: string;
+  protected readonly aggregatorIdStore = new Map<string, string>();
 
-  constructor(outputDirectory: string, experimentConfig: any, podProviderUrl: string) {
-    this.podProviderUrl = podProviderUrl;
+  private readonly podsPerServer: number;
+  private readonly solidPortBase: number;
+  private readonly umaPortBase: number;
+
+  private readonly podContexts = new Map<string, PodContext>();
+  private readonly servers = new Map<number, ServerInstanceContext>();
+  private readonly serverPodNames = new Map<number, string[]>();
+  private nextServerIndex = 0;
+
+  constructor(outputDirectory: string, experimentConfig: any, options: ServerDistributionOptions = {}) {
     this.experimentConfig = experimentConfig;
     this.outputDirectory = outputDirectory;
+
+    const envPodsPerServer = parsePositiveInteger(process.env.PODS_PER_SERVER);
+    const configPodsPerServer = parsePositiveInteger(experimentConfig?.podsPerServer);
+    const rawPodsPerServer = options.podsPerServer ?? envPodsPerServer ?? configPodsPerServer;
+    this.podsPerServer = rawPodsPerServer ?? Number.POSITIVE_INFINITY;
+
+    const envSolidPortBase = parseNonNegativeInteger(process.env.SOLID_PORT_BASE);
+    const configSolidPortBase = parseNonNegativeInteger(experimentConfig?.solidPortBase);
+    const rawSolidPortBase = options.solidPortBase ?? envSolidPortBase ?? configSolidPortBase;
+    this.solidPortBase = rawSolidPortBase ?? 3000;
+
+    const envUmaPortBase = parseNonNegativeInteger(process.env.UMA_PORT_BASE);
+    const configUmaPortBase = parseNonNegativeInteger(experimentConfig?.umaPortBase);
+    const rawUmaPortBase = options.umaPortBase ?? envUmaPortBase ?? configUmaPortBase;
+    this.umaPortBase = rawUmaPortBase ?? 4000;
   }
 
-  protected async createAggregatorService(auth: Auth, FnoDescription: string): Promise<string> {
-    const response = await auth.fetch(`${this.aggregatorUrl}config/actors`, {
-      method: "POST",
-      headers: {
-        "content-type": "text/turtle"
-      },
-      body: FnoDescription,
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to configure aggregator: ${await response.text()}`);
+  protected removeGeneratedData(): void {
+    fs.rmSync(this.outputDirectory, {recursive: true, force: true});
+  }
+
+  protected getOrCreatePodContext(podName: string): PodContext {
+    const existing = this.podContexts.get(podName);
+    if (existing) {
+      return existing;
     }
-    return (await response.json()).id;
-  }
 
-  protected async getAggregatorService(auth: Auth, serviceId: string): Promise<any> {
-    const response = await auth.fetch(`${this.aggregatorUrl}/${serviceId}/`, {
-      method: "GET",
-      headers: {
-        "Accept": "application/sparql-results+json"
-      }
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to get aggregator: ${await response.text()}`);
+    let serverIndex = this.nextServerIndex;
+    let podsForServer = this.serverPodNames.get(serverIndex);
+    if (!podsForServer) {
+      podsForServer = [];
+      this.serverPodNames.set(serverIndex, podsForServer);
     }
-    return await response.json();
+
+    if (Number.isFinite(this.podsPerServer) && this.podsPerServer > 0 && podsForServer.length >= this.podsPerServer) {
+      serverIndex = ++this.nextServerIndex;
+      podsForServer = [];
+      this.serverPodNames.set(serverIndex, podsForServer);
+    }
+
+    if (serverIndex > 999) {
+      throw new Error(`Exceeded maximum supported server count (1000). Attempted to create server index ${serverIndex}.`);
+    }
+
+    const server = this.getOrCreateServerContext(serverIndex);
+    const relativePath = `${server.relativePath}/${podName}`;
+    const absolutePath = path.join(server.absolutePath, podName);
+    const baseUrl = `${server.solidBaseUrl}${podName}`;
+
+    const context: PodContext = {
+      name: podName,
+      relativePath,
+      absolutePath,
+      baseUrl,
+      webId: `${baseUrl}/profile/card#me`,
+      email: `${podName}@example.org`,
+      server,
+    };
+
+    podsForServer.push(podName);
+    this.podContexts.set(podName, context);
+    return context;
   }
 
-  protected async waitForAggregatorService(auth: Auth, serviceId: string): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      const serviceUrl = `http://localhost:5000/${serviceId}/events`;
-      let sse: undefined | EventEmitter = undefined;
-      const abortController = new AbortController();
-      while (sse === undefined) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          sse = await auth.sse(serviceUrl, abortController);
-        } catch (e) {
-          console.log(`Aggregator service ${serviceUrl} not yet available, retrying...`);
-          console.error(e);
-          sse = undefined;
-        }
-      }
-      sse!.on("message", (message) => {
-        if (message.eventType === "up-to-date") {
-          console.log(`Aggregator service ${serviceUrl} is up-to-date.`);
-          resolve();
-          abortController.abort();
-        }
-      });
-
-      sse!.on("end", () => {
-        abortController.abort();
-        reject(new Error(`Aggregator service ${serviceUrl} stream ended before reaching up-to-date state.`));
-      });
-
-      sse!.on("error", (error) => {
-        abortController.abort();
-        reject(new Error(`Error while waiting for aggregator service ${serviceUrl}: ${error.message}`));
-      });
-    });
+  protected getPodNamesForServer(serverIndex: number): string[] {
+    return this.serverPodNames.get(serverIndex) ?? [];
   }
 
-  protected generateMetaData() {
-    const internalDir = path.join(this.outputDirectory, '.internal');
+  public getServers(): ServerInstanceContext[] {
+    return Array.from(this.servers.values()).sort((a, b) => a.index - b.index);
+  }
+
+  public getPodContextByName(podName: string): PodContext {
+    const context = this.podContexts.get(podName);
+    if (!context) {
+      throw new Error(`No pod context registered for pod "${podName}".`);
+    }
+    return context;
+  }
+
+  protected finalizeGeneration(queryUser: PodContext): ExperimentSetup {
+    for (const server of this.getServers()) {
+      this.generateServerMetadata(server);
+    }
+    return {
+      queryUser,
+      servers: this.getServers(),
+    };
+  }
+
+  private getOrCreateServerContext(index: number): ServerInstanceContext {
+    const existing = this.servers.get(index);
+    if (existing) {
+      return existing;
+    }
+
+    const relativePath = `server-${index}`;
+    const absolutePath = path.join(this.outputDirectory, relativePath);
+    const solidPort = this.solidPortBase + index;
+    const umaPort = this.umaPortBase + index;
+
+    const context: ServerInstanceContext = {
+      index,
+      solidPort,
+      umaPort,
+      relativePath,
+      absolutePath,
+      solidBaseUrl: `http://localhost:${solidPort}/`,
+      umaBaseUrl: `http://localhost:${umaPort}/`,
+    };
+
+    this.servers.set(index, context);
+    return context;
+  }
+
+  private generateServerMetadata(server: ServerInstanceContext): void {
+    const podNames = this.getPodNamesForServer(server.index);
+    if (podNames.length === 0) {
+      return;
+    }
+
+    fs.mkdirSync(server.absolutePath, {recursive: true});
+
+    const internalDir = path.join(server.absolutePath, '.internal');
     const accountsDir = path.join(internalDir, 'accounts');
     const idpKeysDir = path.join(internalDir, 'idp/keys');
     const accountsDataDir = path.join(accountsDir, 'data');
     const accountsIndexDir = path.join(accountsDir, 'index');
     const setupDir = path.join(internalDir, 'setup');
 
-    // Create directory structure
-    fs.mkdirSync(internalDir, { recursive: true });
-    fs.mkdirSync(idpKeysDir, { recursive: true });
-    fs.mkdirSync(accountsDataDir, { recursive: true });
-    fs.mkdirSync(accountsIndexDir, { recursive: true });
-    fs.mkdirSync(setupDir, { recursive: true });
+    fs.mkdirSync(internalDir, {recursive: true});
+    fs.mkdirSync(idpKeysDir, {recursive: true});
+    fs.mkdirSync(accountsDataDir, {recursive: true});
+    fs.mkdirSync(accountsIndexDir, {recursive: true});
+    fs.mkdirSync(setupDir, {recursive: true});
 
-    // Get all pod directories
-    const podDirs = fs.readdirSync(this.outputDirectory, { withFileTypes: true })
-      .filter(dirent => dirent.isDirectory() && !dirent.name.startsWith('.'))
-      .map(dirent => dirent.name);
-
-    // Store account info for index generation
     const accountsInfo: Array<{
       accountId: string;
       passwordId: string;
@@ -113,108 +232,103 @@ export class DataGenerator {
       baseUrl: string;
     }> = [];
 
-    // Generate account data for each pod
-    for (const podName of podDirs) {
-      const info = this.generateAccountData(accountsDataDir, podName);
+    for (const podName of podNames) {
+      const info = this.generateAccountData(server, accountsDataDir, podName);
       accountsInfo.push(info);
     }
 
-    // Generate index files
     this.generateIndexFiles(accountsIndexDir, accountsInfo);
+    this.generateSetupFiles(server, setupDir);
 
-    // Generate setup files
-    this.generateSetupFiles(setupDir);
-
-    // .meta
     const idpKeysData = {
-      "key":"idp/keys/jwks",
-      "payload":{
-        "keys":[
+      key: 'idp/keys/jwks',
+      payload: {
+        keys: [
           {
-            "kty":"EC",
-            "x":"9CgO8ZV8qCMNtZVbNyS4l22DJKwQ1nr04qBWLe1FL74",
-            "y":"G8uXhimL9buvA8376nOBPEvMuc90HkbP6gQiM7RFwL8",
-            "crv":"P-256",
-            "d":"LQPy_aN2yL25oruqbRuB2Z5xWKAw22MFFF0EeI11iA0",
-            "alg":"ES256"
-          }
-        ]
-      }
-    }
+            kty: 'EC',
+            x: '9CgO8ZV8qCMNtZVbNyS4l22DJKwQ1nr04qBWLe1FL74',
+            y: 'G8uXhimL9buvA8376nOBPEvMuc90HkbP6gQiM7RFwL8',
+            crv: 'P-256',
+            d: 'LQPy_aN2yL25oruqbRuB2Z5xWKAw22MFFF0EeI11iA0',
+            alg: 'ES256',
+          },
+        ],
+      },
+    };
     fs.writeFileSync(
       path.join(idpKeysDir, 'jwks$.json'),
-      JSON.stringify(idpKeysData)
+      JSON.stringify(idpKeysData),
     );
 
-    // .meta
-    const metaData = "<http://localhost:3000/> a <http://www.w3.org/ns/pim/space#Storage>.\n"
+    const metaData = `<${server.solidBaseUrl}> a <http://www.w3.org/ns/pim/space#Storage>.\n`;
     fs.writeFileSync(
-      path.join(this.outputDirectory, '.meta'),
-      metaData
+      path.join(server.absolutePath, '.meta'),
+      metaData,
     );
 
-    // index.html
     fs.writeFileSync(
-      path.join(this.outputDirectory, 'index.html'),
-      HTMLDATA
+      path.join(server.absolutePath, 'index.html'),
+      HTMLDATA,
     );
   }
 
-  private generateAccountData(accountsDataDir: string, podName: string) {
+  private generateAccountData(
+    server: ServerInstanceContext,
+    accountsDataDir: string,
+    podName: string,
+  ) {
+    const podContext = this.getPodContextByName(podName);
+
     const accountId = randomUUID();
     const passwordId = randomUUID();
     const podId = randomUUID();
     const ownerId = randomUUID();
     const webIdLinkId = randomUUID();
 
-    const webId = `${this.podProviderUrl}${podName}/profile/card#me`;
-    const baseUrl = `${this.podProviderUrl}${podName}/`;
-    const email = `${podName}@example.org`;
-
     const accountData = {
       key: `accounts/data/${accountId}`,
       payload: {
         linkedLoginsCount: 1,
         id: accountId,
-        "**password**": {
+        '**password**': {
           [passwordId]: {
-            accountId: accountId,
-            email: email,
-            password: "$2a$10$z6jXAFtogul3L42NqdEXQe.1sKVH8p5y97uOQrIyiWLX4zZJvfymG", // bcrypt hash of 'password'
+            accountId,
+            email: podContext.email,
+            password: '$2a$10$z6jXAFtogul3L42NqdEXQe.1sKVH8p5y97uOQrIyiWLX4zZJvfymG',
             verified: true,
-            id: passwordId
-          }
+            id: passwordId,
+          },
         },
-        "**clientCredentials**": {},
-        "**pod**": {
+        '**clientCredentials**': {},
+        '**pod**': {
           [podId]: {
-            baseUrl: baseUrl,
-            accountId: accountId,
+            baseUrl: `${podContext.baseUrl}/`,
+            accountId,
             id: podId,
-            "**owner**": {
+            '**owner**': {
               [ownerId]: {
-                podId: podId,
-                webId: webId,
+                podId,
+                webId: podContext.webId,
                 visible: false,
-                id: ownerId
-              }
-            }
-          }
+                id: ownerId,
+              },
+            },
+          },
         },
-        "**webIdLink**": {
+        '**webIdLink**': {
           [webIdLinkId]: {
-            webId: webId,
-            accountId: accountId,
-            id: webIdLinkId
-          }
-        }
-      }
+            webId: podContext.webId,
+            accountId,
+            id: webIdLinkId,
+          },
+        },
+      },
     };
 
     const filename = `${accountId}$.json`;
     fs.writeFileSync(
       path.join(accountsDataDir, filename),
-      JSON.stringify(accountData)
+      JSON.stringify(accountData),
     );
 
     return {
@@ -223,15 +337,14 @@ export class DataGenerator {
       podId,
       ownerId,
       webIdLinkId,
-      podName,
-      email,
-      webId,
-      baseUrl
+      podName: podContext.name,
+      email: podContext.email,
+      webId: podContext.webId,
+      baseUrl: `${podContext.baseUrl}/`,
     };
   }
 
   private generateIndexFiles(accountsIndexDir: string, accountsInfo: Array<any>) {
-    // Create index directory structure
     const ownerDir = path.join(accountsIndexDir, 'owner');
     const passwordDir = path.join(accountsIndexDir, 'password');
     const passwordEmailDir = path.join(passwordDir, 'email');
@@ -240,131 +353,119 @@ export class DataGenerator {
     const webIdLinkDir = path.join(accountsIndexDir, 'webIdLink');
     const webIdLinkWebIdDir = path.join(webIdLinkDir, 'webId');
 
-    fs.mkdirSync(ownerDir, { recursive: true });
-    fs.mkdirSync(passwordEmailDir, { recursive: true });
-    fs.mkdirSync(podBaseUrlDir, { recursive: true });
-    fs.mkdirSync(webIdLinkWebIdDir, { recursive: true });
+    fs.mkdirSync(ownerDir, {recursive: true});
+    fs.mkdirSync(passwordEmailDir, {recursive: true});
+    fs.mkdirSync(podBaseUrlDir, {recursive: true});
+    fs.mkdirSync(webIdLinkWebIdDir, {recursive: true});
 
     for (const info of accountsInfo) {
-      // Owner index files
       const ownerIndexData = {
         key: `accounts/index/owner/${info.ownerId}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(ownerDir, `${info.ownerId}$.json`),
-        JSON.stringify(ownerIndexData)
+        JSON.stringify(ownerIndexData),
       );
 
-      // Password index files
       const passwordIndexData = {
         key: `accounts/index/password/${info.passwordId}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(passwordDir, `${info.passwordId}$.json`),
-        JSON.stringify(passwordIndexData)
+        JSON.stringify(passwordIndexData),
       );
 
-      // Password email index files
       const encodedEmail = encodeURIComponent(info.email);
       const passwordEmailIndexData = {
         key: `accounts/index/password/email/${encodedEmail}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(passwordEmailDir, `${info.email}$.json`),
-        JSON.stringify(passwordEmailIndexData)
+        JSON.stringify(passwordEmailIndexData),
       );
 
-      // Pod index files
       const podIndexData = {
         key: `accounts/index/pod/${info.podId}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(podDir, `${info.podId}$.json`),
-        JSON.stringify(podIndexData)
+        JSON.stringify(podIndexData),
       );
 
-      // Pod baseUrl index files
       const encodedBaseUrl = encodeURIComponent(info.baseUrl);
       const podBaseUrlIndexData = {
         key: `accounts/index/pod/baseUrl/${encodedBaseUrl}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(podBaseUrlDir, `${encodedBaseUrl}$.json`),
-        JSON.stringify(podBaseUrlIndexData)
+        JSON.stringify(podBaseUrlIndexData),
       );
 
-      // WebIdLink index files
       const webIdLinkIndexData = {
         key: `accounts/index/webIdLink/${info.webIdLinkId}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(webIdLinkDir, `${info.webIdLinkId}$.json`),
-        JSON.stringify(webIdLinkIndexData)
+        JSON.stringify(webIdLinkIndexData),
       );
 
-      // WebIdLink webId index files - preserve # character
       const encodedWebId = this.encodeWebIdForFilename(info.webId);
       const webIdLinkWebIdIndexData = {
         key: `accounts/index/webIdLink/webId/${encodedWebId}`,
-        payload: [info.accountId]
+        payload: [info.accountId],
       };
       fs.writeFileSync(
         path.join(webIdLinkWebIdDir, `${encodedWebId}$.json`),
-        JSON.stringify(webIdLinkWebIdIndexData)
+        JSON.stringify(webIdLinkWebIdIndexData),
       );
     }
   }
 
   private encodeWebIdForFilename(webId: string): string {
-    // Encode URI components but preserve the # character
     return encodeURIComponent(webId).replace(/%23/g, '#');
   }
 
-  private generateSetupFiles(setupDir: string) {
-    // Current base URL
+  private generateSetupFiles(server: ServerInstanceContext, setupDir: string) {
     const baseUrlData = {
-      key: "setup/current-base-url",
-      payload: this.podProviderUrl
+      key: 'setup/current-base-url',
+      payload: server.solidBaseUrl,
     };
     fs.writeFileSync(
       path.join(setupDir, 'current-base-url$.json'),
-      JSON.stringify(baseUrlData)
+      JSON.stringify(baseUrlData),
     );
 
-    // Server version
     const versionData = {
-      key: "setup/current-server-version",
-      payload: "7.1.7"
+      key: 'setup/current-server-version',
+      payload: '7.1.7',
     };
     fs.writeFileSync(
       path.join(setupDir, 'current-server-version$.json'),
-      JSON.stringify(versionData)
+      JSON.stringify(versionData),
     );
 
-    // Root initialized
     const rootInitData = {
-      key: "setup/rootInitialized",
-      payload: true
+      key: 'setup/rootInitialized',
+      payload: true,
     };
     fs.writeFileSync(
       path.join(setupDir, 'rootInitialized$.json'),
-      JSON.stringify(rootInitData)
+      JSON.stringify(rootInitData),
     );
 
-    // V6 migration
     const migrationData = {
-      key: "setup/v6-migration",
-      payload: true
+      key: 'setup/v6-migration',
+      payload: true,
     };
     fs.writeFileSync(
       path.join(setupDir, 'v6-migration$.json'),
-      JSON.stringify(migrationData)
+      JSON.stringify(migrationData),
     );
   }
 }
