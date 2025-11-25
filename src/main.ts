@@ -1,7 +1,11 @@
-import {startServers, stopServers} from "./server-functions";
+import {startServers, stopServers} from "./utils/server-functions";
 import * as path from 'path';
+import type {Experiment} from "./experiment";
+import type {ExperimentSetup} from "./data-generator";
 import {OverviewPageExperiment} from "./watch-party/overview-page-experiment";
 import {WatchPageExperiment} from "./watch-party/watch-page-experiment";
+import {Auth} from "./utils/auth";
+import {Logger, type LogLevel} from './utils/logger';
 
 process.stdin.resume();
 
@@ -23,16 +27,22 @@ process.on('SIGUSR2', exitHandler);
 // catches uncaught exceptions
 process.on('uncaughtException', exitHandler);
 
-async function runExperiment(experimentName: string, experimentConfig: any) {
+async function runExperiment(experimentName: string, experimentConfig: any, debug?: string) {
+  // Configure logger level based on debug flag
+  if (debug) {
+    const level = (debug.toLowerCase() as LogLevel);
+    Logger.setLevel(level);
+  }
+
   const experimentLocation = path.resolve(`./experiment-data/${experimentName}`);
-  // generate the data
   let experiment: Experiment | null = null;
+  let setup: ExperimentSetup | null = null;
   switch (experimentConfig.type) {
     case "watchparty-overview-page":
       experiment = new OverviewPageExperiment(experimentLocation, experimentConfig);
       break;
     case "watchparty-watch-page":
-      //experiment = new WatchPageExperiment(experimentLocation, experimentConfig);
+      experiment = new WatchPageExperiment(experimentLocation, experimentConfig);
       break;
     default:
       throw new Error(`Unknown experiment type: ${experimentConfig.type}`);
@@ -40,21 +50,21 @@ async function runExperiment(experimentName: string, experimentConfig: any) {
   if (!experiment) {
     throw new Error(`Could not create experiment of type: ${experimentConfig.type}`);
   }
-  // generate the data
-  const query_user = experiment.generate();
-  // start the servers
+
+  await Auth.resetCache();
+  setup = experiment.generate();
 
   await startServers(
     "/home/maarten/Documents/doctoraat/code/original-uma/packages/uma",
     "/home/maarten/Documents/doctoraat/code/original-uma/packages/css",
     "/home/maarten/Documents/doctoraat/code/aggregator",
     experimentLocation,
-    query_user
+    setup.servers,
+    setup.queryUser,
+    debug
   );
 
-  await experiment.setupAggregators();
-
-  await experiment.run(false, 3);
+  await experiment.run(false, 2);
 
   await experiment.run(true, 1);
 
@@ -70,9 +80,12 @@ runExperiment("test-experiment-1", {
         [1],
         [5],
         [10],
+        [15],
+        [20],
       ]
     }
-  ]
+  ],
+  "podsPerServer": 30
 }).then(() => {
   console.log("Experiment completed");
 }).catch((error) => {
@@ -88,10 +101,13 @@ runExperiment("test-experiment-2", {
       "args": [
       // [ numberOfMembers, numberOfMessagesPerMember ]
         [10, 1],
-        [50, 1],
-        [100, 1],
       ]
     }
-  ]
+  ],
+  "podsPerServer": 30
+}, "warn").then(() => {
+  console.log("Experiment completed");
+}).catch((error) => {
+  console.error("Experiment failed: ", error);
 });
 */

@@ -6,7 +6,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
-    "start": "node ./dist/main.js"
+    "start": "node ./dist/main.js",
+    "start-uma": "cd ../original-uma/packages/uma && yarn start",
+    "start-css": "cd ../original-uma/packages/css && yarn run community-solid-server -m . -c ./config/default.json -a http://localhost:4000/ -f /home/maarten/Documents/doctoraat/code/query-aggregator-evaluation/experiment-data/test-experiment-2"
   },
   "keywords": [],
   "author": "",
