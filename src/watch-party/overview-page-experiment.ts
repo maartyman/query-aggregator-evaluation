@@ -6,6 +6,10 @@ import {Auth} from '../utils/auth';
 import {QueryEngine} from '@comunica/query-sparql';
 import {UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
+import {createAggregatorService, getAggregatorService, waitForAggregatorService} from "../utils/aggregator-functions";
+import {ExperimentSetup, PodContext} from "../data-generator";
+import type {Experiment} from "../experiment";
+import {Logger} from "../utils/logger";
 
 const queryMessageLocations = `PREFIX ldp: <http://www.w3.org/ns/ldp#>
 SELECT ?messageLocations WHERE {
@@ -72,8 +76,8 @@ _:RoomsQuery
     trans:sources ( _:MessageBoxesResultsSource ) .
 `;
 
-async function runQueriesInWorker(podName: string, linkTraversalMethod: LinkTraversalMethod): Promise<ExperimentResult> {
-  const auth = new Auth(podName);
+async function runQueriesInWorker(podContext: PodContext, linkTraversalMethod: LinkTraversalMethod, cache: boolean): Promise<ExperimentResult> {
+  const auth = new Auth(podContext, {enableCache: cache});
   await auth.init();
   await auth.getAccessToken();
   const engine = new QueryEngine();
@@ -81,7 +85,7 @@ async function runQueriesInWorker(podName: string, linkTraversalMethod: LinkTrav
   const startTime = process.hrtime();
 
   const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
-    sources: [`http://localhost:3000/${podName}/watchparties/myMessages/`],
+    sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
     fetch: auth.fetch.bind(auth)
   });
 
@@ -131,36 +135,13 @@ async function runQueriesInWorker(podName: string, linkTraversalMethod: LinkTrav
   }
 
   return await ExperimentResult.fromIterator(
-    podName+"_"+linkTraversalMethod,
+    podContext.name + "_" + linkTraversalMethod + "_" + (cache ? "cache" : "no-cache"),
     startTime,
     resultIterator
   );
 }
 
 export class OverviewPageExperiment extends WatchpartyDataGenerator implements Experiment {
-  generate(): string {
-    for (const iteration of this.experimentConfig.iterations) {
-      for (const arg of iteration.args) {
-        this.generateForOverviewPage(iteration.iterationName+"-"+arg.join("_"), arg[0]);
-      }
-    }
-    this.generateMetaData();
-    return this.getUserPodRelativePath(
-      this.queryUser,
-      this.experimentConfig.iterations[0].iterationName+"-"+this.experimentConfig.iterations[0].args[0].join("_")
-    );
-  }
-
-  async setupAggregators() {
-    const promises: Promise<void>[] = [];
-    for (const iteration of this.experimentConfig.iterations) {
-      for (const arg of iteration.args) {
-        promises.push(this.setupAggregator(iteration.iterationName + "-" + arg.join("_") + "_query-user"));
-      }
-    }
-    await Promise.all(promises);
-  }
-
   async run(saveResults: boolean, iterations: number): Promise<void> {
     const results: ExperimentResult[] = [];
 
@@ -168,94 +149,119 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
-          for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
-            const result = await new Promise<ExperimentResult>((resolve, reject) => {
-              const worker = new Worker(__filename, {
-                workerData: {podName, linkTraversalMethod}
-              });
+          const podContext = this.getPodContextByName(podName);
+          for (const cache of [false, true]) {
+            for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
+              Logger.info(`Running experiment for pod ${podName}, link traversal method ${linkTraversalMethod}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+              const result = await new Promise<ExperimentResult>((resolve, reject) => {
+                const worker = new Worker(__filename, {
+                  workerData: {podContext, linkTraversalMethod, cache}
+                });
 
-              worker.on('message', (message) => {
-                if (message.success) {
-                  const experimentResult = ExperimentResult.deserialize(message.result);
-                  results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
+                worker.on('message', (message) => {
+                  if (message.success) {
+                    const experimentResult = ExperimentResult.deserialize(message.result);
+                    results.push(experimentResult);
+                    if (saveResults) {
+                      experimentResult.print();
+                    }
+                    resolve(experimentResult);
+                  } else {
+                    //console.error(`Worker failed for ${podName}:`, message.error);
+                    reject(new Error(message.error));
                   }
-                  resolve(experimentResult);
-                } else {
-                  //console.error(`Worker failed for ${podName}:`, message.error);
-                  reject(new Error(message.error));
-                }
-                worker.terminate();
+                  worker.terminate();
+                });
+
+                worker.on('error', (error) => {
+                  console.error(`Worker error for ${podContext.name}:`, error);
+                  reject(error);
+                });
+
+                worker.on('exit', (code) => {
+                  if (code !== 0) {
+                    //console.error(`Worker stopped with exit code ${code}`);
+                  }
+                });
               });
 
-              worker.on('error', (error) => {
-                console.error(`Worker error for ${podName}:`, error);
-                reject(error);
-              });
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            await this.setupAggregator(podContext);
 
-              worker.on('exit', (code) => {
-                if (code !== 0) {
-                  //console.error(`Worker stopped with exit code ${code}`);
-                }
-              });
-            });
+            const auth = new Auth(podContext, {enableCache: cache});
+            await auth.init();
+            await auth.getAccessToken();
+
+            const startTime = process.hrtime();
+
+            const aggregatorResult = ExperimentResult.fromJson(
+              podContext.name + "_aggregator_" + (cache? "cache" : "no-cache"),
+              startTime,
+              await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
+            );
+            results.push(aggregatorResult);
+            if (saveResults) {
+              aggregatorResult.print();
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
-
-          const auth = new Auth(podName);
-          await auth.init();
-          await auth.getAccessToken();
-
-          const startTime = process.hrtime();
-
-          const aggregatorReult = ExperimentResult.fromJson(
-            podName + "_aggregator",
-            startTime,
-            await this.getAggregatorService(auth, this.aggregatorIdStore.get(podName)!)
-          );
-          results.push(aggregatorReult);
-          if (saveResults) {
-            aggregatorReult.print();
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 100));
         }
       }
     }
   }
 
-  private async setupAggregator(podName: string) {
-    const auth = new Auth(podName);
+  private async setupAggregator(podContext: PodContext) {
+    if (this.aggregatorIdStore.has(podContext.name)) {
+      return;
+    }
+    const auth = new Auth(podContext, {enableCache: true});
     await auth.init();
     await auth.getAccessToken();
 
     // start first aggregator with message locations query
-    const messageLocationsId = await this.createAggregatorService(auth, fnoConfMessageLocations.replace(
+    const messageLocationsId = await createAggregatorService(auth, fnoConfMessageLocations.replace(
       "$MessageContainer$",
-      `http://localhost:3000/${podName}/watchparties/myMessages/`
+      `${podContext.baseUrl}/watchparties/myMessages/`
     ));
-    await this.waitForAggregatorService(auth, messageLocationsId);
+    await waitForAggregatorService(auth, messageLocationsId);
 
     // start second aggregator with message boxes query passing in the result of the first
-    const messageBoxesId = await this.createAggregatorService(auth, fnoConfMessageBoxes.replace(
+    const messageBoxesId = await createAggregatorService(auth, fnoConfMessageBoxes.replace(
       "$MessageLocationsQueryResultLocation$",
       `http://localhost:5000/${messageLocationsId}/`
     ));
-    await this.waitForAggregatorService(auth, messageBoxesId);
+    await waitForAggregatorService(auth, messageBoxesId);
 
     // start third aggregator with rooms query passing in the result of the second
-    this.aggregatorIdStore.set(podName, await this.createAggregatorService(auth, fnoConfRooms.replace(
+    const roomsId = await createAggregatorService(auth, fnoConfRooms.replace(
       "$MessageBoxesQueryResultLocation$",
       `http://localhost:5000/${messageBoxesId}/`
-    )));
-    await this.waitForAggregatorService(auth, messageBoxesId);
+    ))
+    this.aggregatorIdStore.set(podContext.name, roomsId);
+    await waitForAggregatorService(auth, roomsId);
+  }
+
+  generate(): ExperimentSetup {
+    this.removeGeneratedData();
+    for (const iteration of this.experimentConfig.iterations) {
+      for (const arg of iteration.args) {
+        this.generateForOverviewPage(iteration.iterationName+"-"+arg.join("_"), arg[0]);
+      }
+    }
+    const firstIteration = this.experimentConfig.iterations[0];
+    const firstArg = firstIteration.args[0];
+    const firstExperimentId = `${firstIteration.iterationName}-${firstArg.join("_")}`;
+    const queryUserContext = this.getUserPodContext(this.queryUser, firstExperimentId);
+    return this.finalizeGeneration(queryUserContext);
   }
 
   private generateForOverviewPage(experimentId: string, numberOfJoinedWatchparties: number) {
-    const queryUserPodUrl = this.getUserPodUrl(this.queryUser, experimentId);
-    const queryUserRelativePath = this.getUserPodRelativePath(this.queryUser, experimentId);
+    const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
+    const queryUserPodUrl = queryUserContext.baseUrl;
+    const queryUserRelativePath = queryUserContext.relativePath;
     const cardTriples = `@prefix foaf: <http://xmlns.com/foaf/0.1/>.
 @prefix solid: <http://www.w3.org/ns/solid/terms#>.
 
@@ -265,7 +271,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     foaf:primaryTopic <${queryUserPodUrl}/profile/card#me>.
 
 <${queryUserPodUrl}/profile/card#me>
-    solid:oidcIssuer <${this.podProviderUrl}>;
+    solid:oidcIssuer <${queryUserContext.server.solidBaseUrl}>;
     a foaf:Person.
 `;
     const cardFilePath = `${this.outputDirectory}/${queryUserRelativePath}/profile/card$.ttl`;
@@ -276,8 +282,9 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
       const randomDate = new Date(Date.now() + Math.floor(Math.random() * 10000000000));
       const isoDate = randomDate.toISOString();
       const userId = `user${i}`;
-      const userPodUrl = this.getUserPodUrl(userId, experimentId);
-      const userRelativePath = this.getUserPodRelativePath(userId, experimentId);
+      const userContext = this.getUserPodContext(userId, experimentId);
+      const userPodUrl = userContext.baseUrl;
+      const userRelativePath = userContext.relativePath;
       const roomId = `room-of-user${i}`;
       const roomTriples = `<#${roomId}> a <http://schema.org/EventSeries>;
     <http://schema.org/description> "Solid Watchparty";
@@ -304,7 +311,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
-  runQueriesInWorker(workerData.podName, workerData.linkTraversalMethod)
+  runQueriesInWorker(workerData.podContext, workerData.linkTraversalMethod, workerData.cache)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })

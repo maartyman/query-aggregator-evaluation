@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import {DataGenerator} from "../data-generator";
+import {DataGenerator, PodContext, ServerDistributionOptions} from "../data-generator";
 
 // generates multiple pods with the necessary triples related to the watch party use case
 
@@ -77,22 +77,34 @@ export class WatchpartyDataGenerator extends DataGenerator {
         return `${experimentId}`;
     }
 
-    protected getUserPodRelativePath(user: string, experimentId: string) {
+    protected getPodName(user: string, experimentId: string): string {
         return `${this.getExperimentPrefix(experimentId)}_${user}`;
     }
 
+    protected getUserPodContext(user: string, experimentId: string): PodContext {
+        return this.getOrCreatePodContext(this.getPodName(user, experimentId));
+    }
+
+    protected getUserPodRelativePath(user: string, experimentId: string) {
+        return this.getUserPodContext(user, experimentId).relativePath;
+    }
+
     protected getUserPodUrl(user: string, experimentId: string) {
-        return `${this.podProviderUrl}${this.getUserPodRelativePath(user, experimentId)}`;
+        return this.getUserPodContext(user, experimentId).baseUrl;
+    }
+
+    protected getUserIssuerUrl(user: string, experimentId: string) {
+        return this.getUserPodContext(user, experimentId).server.solidBaseUrl;
     }
 
     public constructor(
       outputDirectory: string,
       experimentConfig: any,
-      podProviderUrl: string = "http://localhost:3000/",
+      distributionOptions: ServerDistributionOptions = {},
       queryUser: string = "query-user",
       room: string = "room",
     ) {
-        super(outputDirectory, experimentConfig, podProviderUrl);
+        super(outputDirectory, experimentConfig, distributionOptions);
         this.queryUser = queryUser;
         this.room = room;
     }

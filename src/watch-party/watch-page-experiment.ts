@@ -6,6 +6,9 @@ import {QueryEngine} from "@comunica/query-sparql";
 import {isMainThread, parentPort, Worker, workerData} from 'worker_threads';
 import {UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
+import {createAggregatorService, getAggregatorService, waitForAggregatorService} from "../utils/aggregator-functions";
+import {ExperimentSetup, PodContext} from "../data-generator";
+import type {Experiment} from "../experiment";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
 SELECT ?messageBoxUrl
@@ -70,14 +73,14 @@ _:RoomsQuery
     trans:sources ( _:MessageBoxesResultsSource ) .
 `;
 
-async function runQueriesInWorker(podName: string, room: string, linkTraversalMethod: LinkTraversalMethod): Promise<ExperimentResult> {
-  const auth = new Auth(podName);
+async function runQueriesInWorker(podContext: PodContext, room: string, linkTraversalMethod: LinkTraversalMethod, cache: boolean): Promise<ExperimentResult> {
+  const auth = new Auth(podContext, {enableCache: cache});
   await auth.init();
   await auth.getAccessToken();
   const engine = new QueryEngine();
 
   const startTime = process.hrtime();
-  const roomIri = `http://localhost:3000/${podName}/watchparties/myRooms/${room}/room#${room}`;
+  const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
   const roomBindingsStream = await engine.queryBindings(queryRoom, {
     sources: [roomIri],
     fetch: auth.fetch.bind(auth)
@@ -147,24 +150,25 @@ async function runQueriesInWorker(podName: string, room: string, linkTraversalMe
   }
 
   return await ExperimentResult.fromIterator(
-    podName+"_"+linkTraversalMethod,
+    podContext.name + "_" + linkTraversalMethod + "_" + (cache ? "cache" : "no-cache"),
     startTime,
     resultIterator
   );
 }
 
 export class WatchPageExperiment extends WatchpartyDataGenerator implements Experiment {
-  generate(): string {
+  generate(): ExperimentSetup {
+    this.removeGeneratedData();
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
         this.generateForWatchPage(iteration.iterationName+"-"+arg.join("_"), arg[0], arg[1]);
       }
     }
-    this.generateMetaData();
-    return this.getUserPodRelativePath(
-      this.queryUser,
-      this.experimentConfig.iterations[0].iterationName+"-"+this.experimentConfig.iterations[0].args[0].join("_")
-    );
+    const firstIteration = this.experimentConfig.iterations[0];
+    const firstArg = firstIteration.args[0];
+    const firstExperimentId = `${firstIteration.iterationName}-${firstArg.join("_")}`;
+    const queryUserContext = this.getUserPodContext(this.queryUser, firstExperimentId);
+    return this.finalizeGeneration(queryUserContext);
   }
 
   async run(saveResults: boolean, iterations: number): Promise<void> {
@@ -173,53 +177,107 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
+          const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
+          const podContext = this.getPodContextByName(podName);
           for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
-            const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
+            for (const cache of [false, true]) {
+              const result = await new Promise<ExperimentResult>((resolve, reject) => {
+                const worker = new Worker(__filename, {
+                  workerData: {podContext, roomName: this.room, linkTraversalMethod, cache}
+                });
 
-            const result = await new Promise<ExperimentResult>((resolve, reject) => {
-              const worker = new Worker(__filename, {
-                workerData: {podName, roomName: this.room, linkTraversalMethod}
-              });
-
-              worker.on('message', (message) => {
-                if (message.success) {
-                  const experimentResult = ExperimentResult.deserialize(message.result);
-                  results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
+                worker.on('message', (message) => {
+                  if (message.success) {
+                    const experimentResult = ExperimentResult.deserialize(message.result);
+                    results.push(experimentResult);
+                    if (saveResults) {
+                      experimentResult.print();
+                    }
+                    resolve(experimentResult);
+                  } else {
+                    console.error(`Worker failed for ${podContext.name}:`, message.error);
+                    reject(new Error(message.error));
                   }
-                  resolve(experimentResult);
-                } else {
-                  console.error(`Worker failed for ${podName}:`, message.error);
-                  reject(new Error(message.error));
-                }
-                worker.terminate();
-              });
+                  worker.terminate();
+                });
 
-              worker.on('error', (error) => {
-                console.error(`Worker error for ${podName}:`, error);
-                reject(error);
-              });
+                worker.on('error', (error) => {
+                  console.error(`Worker error for ${podContext.name}:`, error);
+                  reject(error);
+                });
 
-              worker.on('exit', (code) => {
-                if (code !== 0) {
-                  //console.error(`Worker ${workerName} stopped with exit code ${code}`);
-                }
+                worker.on('exit', (code) => {
+                  if (code !== 0) {
+                    //console.error(`Worker ${workerName} stopped with exit code ${code}`);
+                  }
+                });
               });
-            });
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
           }
+          await this.setupAggregator(podContext);
+
+          const auth = new Auth(podContext, {enableCache: true});
+          await auth.init();
+          await auth.getAccessToken();
+
+          const startTime = process.hrtime();
+
+          const aggregatorReult = ExperimentResult.fromJson(
+            podContext.name + "_aggregator",
+            startTime,
+            await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
+          );
+          results.push(aggregatorReult);
+          if (saveResults) {
+            aggregatorReult.print();
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 100));
         }
       }
     }
   }
 
+  private async setupAggregator(podContext: PodContext) {
+    if (this.aggregatorIdStore.has(podContext.name)) {
+      return;
+    }
+    const auth = new Auth(podContext, {enableCache: true});
+    await auth.init();
+    await auth.getAccessToken();
+
+    const roomInfoId = await createAggregatorService(auth, fnoConfRoom.replace(
+      "$room$",
+      `${podContext.baseUrl}/watchparties/myRooms/${this.room}/room#${this.room}`
+    ));
+    await waitForAggregatorService(auth, roomInfoId);
+
+    const messageBoxesId = await createAggregatorService(auth, fnoConfMessages.replace(
+      "$MessageLocationsQueryResultLocation$",
+      `http://localhost:5000/${roomInfoId}/`
+    ));
+    await waitForAggregatorService(auth, messageBoxesId);
+
+    const personId = await createAggregatorService(auth, fnoConfPerson.replace(
+      "$MessageBoxes$",
+      `http://localhost:5000/${messageBoxesId}/`
+    ))
+    this.aggregatorIdStore.set(podContext.name, personId);
+    await waitForAggregatorService(auth, personId);
+  }
+
   public generateForWatchPage(experimentId: string, numberOfMembers: number, numberOfMessagesPerMember: number) {
     const randomDate = new Date(Date.now() + Math.floor(Math.random() * 10000000000));
     const isoDate = randomDate.toISOString();
-    const queryUserPodUrl = this.getUserPodUrl(this.queryUser, experimentId);
-    const queryUserRelativePath = this.getUserPodRelativePath(this.queryUser, experimentId);
+    const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
+    const queryUserPodUrl = queryUserContext.baseUrl;
+    const queryUserRelativePath = queryUserContext.relativePath;
+
     const organizerUserId = numberOfMembers > 0 ? 'user1' : this.queryUser;
-    const organizerPodUrl = this.getUserPodUrl(organizerUserId, experimentId);
+    const organizerContext = this.getUserPodContext(organizerUserId, experimentId);
+    const organizerPodUrl = organizerContext.baseUrl;
+
     let roomTriples = `<#${this.room}> a <http://schema.org/EventSeries>;
     <http://schema.org/description> "Solid Watchparty";
     <http://schema.org/name> "Room of ${this.queryUser}";
@@ -228,9 +286,9 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     <http://schema.org/attendee>`;
     for (let i = 1; i <= numberOfMembers; i++) {
       const userId = `user${i}`;
-      const userPodUrl = this.getUserPodUrl(userId, experimentId);
+      const userContext = this.getUserPodContext(userId, experimentId);
       roomTriples += `
-        <${userPodUrl}/profile/card#me>`;
+        <${userContext.baseUrl}/profile/card#me>`;
       if (i < numberOfMembers) {
         roomTriples += `,`;
       } else {
@@ -241,9 +299,9 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     <http://schema.org/subjectOf>`;
     for (let i = 1; i <= numberOfMembers; i++) {
       const userId = `user${i}`;
-      const userPodUrl = this.getUserPodUrl(userId, experimentId);
+      const userContext = this.getUserPodContext(userId, experimentId);
       roomTriples += `
-        <${userPodUrl}/watchparties/myMessages/${this.room}#outbox>`;
+        <${userContext.baseUrl}/watchparties/myMessages/${this.room}#outbox>`;
       if (i < numberOfMembers) {
         roomTriples += `,`;
       } else {
@@ -251,10 +309,9 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
       }
     }
     const roomFilePath = `${this.outputDirectory}/${queryUserRelativePath}/watchparties/myRooms/${this.room}/room$.ttl`;
-    fs.mkdirSync(path.dirname(roomFilePath), { recursive: true });
+    fs.mkdirSync(path.dirname(roomFilePath), {recursive: true});
     fs.writeFileSync(roomFilePath, roomTriples);
 
-    // Generate profile card for the query user
     const queryUserCardTriples = `@prefix foaf: <http://xmlns.com/foaf/0.1/>.
 @prefix solid: <http://www.w3.org/ns/solid/terms#>.
 
@@ -264,18 +321,19 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     foaf:primaryTopic <${queryUserPodUrl}/profile/card#me>.
 
 <${queryUserPodUrl}/profile/card#me>
-    solid:oidcIssuer <${this.podProviderUrl}>;
+    solid:oidcIssuer <${queryUserContext.server.solidBaseUrl}>;
     a foaf:Person;
     foaf:name "Query User" .
 `;
     const queryUserCardFilePath = `${this.outputDirectory}/${queryUserRelativePath}/profile/card$.ttl`;
-    fs.mkdirSync(path.dirname(queryUserCardFilePath), { recursive: true });
+    fs.mkdirSync(path.dirname(queryUserCardFilePath), {recursive: true});
     fs.writeFileSync(queryUserCardFilePath, queryUserCardTriples);
 
     for (let i = 1; i <= numberOfMembers; i++) {
       const userId = `user${i}`;
-      const userPodUrl = this.getUserPodUrl(userId, experimentId);
-      const userRelativePath = this.getUserPodRelativePath(userId, experimentId);
+      const userContext = this.getUserPodContext(userId, experimentId);
+      const userPodUrl = userContext.baseUrl;
+      const userRelativePath = userContext.relativePath;
       const cardTriples = `@prefix foaf: <http://xmlns.com/foaf/0.1/>.
 @prefix solid: <http://www.w3.org/ns/solid/terms#>.
 
@@ -285,12 +343,12 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     foaf:primaryTopic <${userPodUrl}/profile/card#me>.
 
 <${userPodUrl}/profile/card#me>
-    solid:oidcIssuer <${this.podProviderUrl}>;
+    solid:oidcIssuer <${userContext.server.solidBaseUrl}>;
     a foaf:Person;
     foaf:name "User ${i}" .
 `;
       const cardFilePath = `${this.outputDirectory}/${userRelativePath}/profile/card$.ttl`;
-      fs.mkdirSync(path.dirname(cardFilePath), { recursive: true });
+      fs.mkdirSync(path.dirname(cardFilePath), {recursive: true});
       fs.writeFileSync(cardFilePath, cardTriples);
 
       let messageBoxTriples = `<#outbox> a <http://schema.org/CreativeWorkSeries>;
@@ -317,19 +375,15 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     <http://schema.org/text> "Message ${j} of user${i}".`;
       }
       const messageBoxFilePath = `${this.outputDirectory}/${userRelativePath}/watchparties/myMessages/${this.room}$.ttl`;
-      fs.mkdirSync(path.dirname(messageBoxFilePath), { recursive: true });
+      fs.mkdirSync(path.dirname(messageBoxFilePath), {recursive: true});
       fs.writeFileSync(messageBoxFilePath, messageBoxTriples);
     }
-  }
-
-  setupAggregators(): Promise<void> {
-    return Promise.resolve(undefined);
   }
 }
 
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
-  runQueriesInWorker(workerData.podName, workerData.roomName, workerData.linkTraversalMethod)
+  runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.linkTraversalMethod, workerData.cache)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })
