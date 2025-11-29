@@ -61,6 +61,7 @@ export async function startServers(
   cssLocation: string,
   aggregatorLocation: string,
   dataLocation: string,
+  derivedAuth: boolean,
   servers: ServerInstanceContext[],
   queryUser: PodContext,
   debug?: string
@@ -77,7 +78,7 @@ export async function startServers(
 
   for (const server of servers) {
     console.log(`Starting UMA server-${server.index} on port ${server.umaPort}...`);
-    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${debug?? 'error'}`;
+    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${derivedAuth? "./config/derivation.json" : "./config/default.json"} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${debug?? 'error'}`;
     runCommand(command, `UMA-${server.index}`, debug !== undefined);
   }
 

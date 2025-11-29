@@ -59,6 +59,7 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
     "/home/maarten/Documents/doctoraat/code/original-uma/packages/css",
     "/home/maarten/Documents/doctoraat/code/aggregator",
     experimentLocation,
+    experimentConfig.derivedClaims,
     setup.servers,
     setup.queryUser,
     debug
@@ -73,6 +74,7 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
 
 runExperiment("test-experiment-1", {
   "type": "watchparty-overview-page",
+  "derivedClaims": false,
   "iterations": [
     {
       "iterationName": "number-of-joined-watchparties",
@@ -95,6 +97,7 @@ runExperiment("test-experiment-1", {
 /*
 runExperiment("test-experiment-2", {
   "type": "watchparty-watch-page",
+  "derivedClaims": false,
   "iterations": [
     {
       "iterationName": "number-of-joined-watchparties",
