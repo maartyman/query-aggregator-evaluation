@@ -1,6 +1,7 @@
 .idea/
 experiment-data/
 results/
+.aggregators.json
 
 # Logs
 logs
