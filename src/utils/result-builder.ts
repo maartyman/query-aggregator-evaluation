@@ -98,7 +98,7 @@ export class ExperimentResult {
         const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
 
         if (timestamps.length === 0) {
-          reject(new Error('No results received from iterator.'));
+          reject(new Error(`No results received from iterator during experiment ${experimentId}.`));
         }
 
         resolve(new ExperimentResult(
@@ -136,7 +136,7 @@ export class ExperimentResult {
     }
 
     if (timestamps.length === 0) {
-      throw new Error('No results received from JSON result.');
+      throw new Error(`No results received from JSON result during experiment: ${experimentId}`);
     }
 
     return new ExperimentResult(
