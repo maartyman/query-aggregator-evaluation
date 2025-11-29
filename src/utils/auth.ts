@@ -1,4 +1,3 @@
-import {createDpopHeader, generateDpopKeyPair, KeyPair} from "@inrupt/solid-client-authn-core";
 import {EventEmitter} from "node:events";
 import {fetch} from 'cross-fetch';
 import {PodContext} from "../data-generator";
@@ -9,7 +8,6 @@ import {Logger} from './logger';
 export class Auth {
   private readonly podContext: PodContext;
   private readonly cssBase: string;
-  private dpopKey: KeyPair | undefined;
   private authString: string | undefined;
   private accessToken: string | undefined;
   private activeRequests = 0;
@@ -90,7 +88,6 @@ export class Auth {
 
   async init(): Promise<void> {
     await this.loadCache();
-    this.dpopKey = await generateDpopKeyPair();
 
     let indexResponse = await fetch(`${this.cssBase}/.account/`);
     let controls = (await indexResponse.json()).controls;
@@ -119,12 +116,16 @@ export class Auth {
       body: JSON.stringify({name: 'my-token', webId: this.podContext.webId}),
     });
 
+    if (!response.ok) {
+      throw new Error('Client credentials request failed:' + await response.text());
+    }
+
     const {id, secret} = await response.json();
     this.authString = `${encodeURIComponent(id)}:${encodeURIComponent(secret)}`;
   }
 
   async getAccessToken(): Promise<void> {
-    if (!this.authString || !this.dpopKey) {
+    if (!this.authString) {
       throw new Error('Not initialized');
     }
 
@@ -133,7 +134,6 @@ export class Auth {
       headers: {
         authorization: `Basic ${Buffer.from(this.authString).toString('base64')}`,
         'content-type': 'application/x-www-form-urlencoded',
-        dpop: await createDpopHeader(`${this.cssBase}/.oidc/token`, 'POST', this.dpopKey),
       },
       body: 'grant_type=client_credentials&scope=webid',
     });
@@ -143,16 +143,13 @@ export class Auth {
   }
 
   private async createClaim(tokenEndpoint: string, ticket: string) {
-    if (!this.accessToken || !this.dpopKey) {
+    if (!this.accessToken) {
       throw new Error('Not initialized');
     }
     return {
       grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
       ticket,
-      claim_token: JSON.stringify({
-        Authorization: `DPop ${this.accessToken}`,
-        DPoP: await createDpopHeader(tokenEndpoint, 'POST', this.dpopKey),
-      }),
+      claim_token: this.accessToken,
       claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
     };
   }
@@ -181,7 +178,7 @@ export class Auth {
   }
 
   private async requestTokenWithoutTicket(resourceUrl: string, asUri: string, method?: string): Promise<{ token_type: string; access_token: string } | undefined> {
-    if (!this.accessToken || !this.dpopKey) return undefined;
+    if (!this.accessToken) return undefined;
 
     // Get UMA2 config (cache-aware)
     const tokenEndpoint = await this.getTokenEndpoint(asUri);
@@ -203,10 +200,7 @@ export class Auth {
         resource_scopes,
       }],
       claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
-      claim_token: JSON.stringify({
-        Authorization: `DPop ${this.accessToken}`,
-        DPoP: await createDpopHeader(tokenEndpoint, 'POST', this.dpopKey),
-      }),
+      claim_token: this.accessToken
     };
 
     const res = await this.throttledFetch(tokenEndpoint, {
