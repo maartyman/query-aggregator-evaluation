@@ -16,11 +16,10 @@ export class Auth {
 
   private readonly cacheEnabled: boolean;
   private readonly cacheFilePath: string;
-  private cache: {
-    asUriByOrigin: Record<string, string>;
-    uma2ConfigByAsUri: Record<string, any>;
-    publicResources: Record<string, true>;
-  } = { asUriByOrigin: {}, uma2ConfigByAsUri: {}, publicResources: {} };
+  private umaPermissionTokens: Map<string, {
+    token_type: string;
+    access_token: string;
+  }> = new Map();
 
   constructor(podContext: PodContext, options?: { enableCache?: boolean; cacheFilePath?: string }) {
     this.podContext = podContext;
@@ -45,19 +44,18 @@ export class Auth {
     try {
       const raw = await fsp.readFile(this.cacheFilePath, 'utf8');
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        this.cache.asUriByOrigin = parsed.asUriByOrigin ?? {};
-        this.cache.uma2ConfigByAsUri = parsed.uma2ConfigByAsUri ?? {};
-        this.cache.publicResources = parsed.publicResources ?? {};
-        Logger.debug('Loaded cache from disk', this.cacheFilePath, {
-          asUriByOrigin: Object.keys(this.cache.asUriByOrigin).length,
-          uma2ConfigByAsUri: Object.keys(this.cache.uma2ConfigByAsUri).length,
-          publicResources: Object.keys(this.cache.publicResources).length,
-        });
+      if (parsed && typeof parsed === 'object' && parsed.umaPermissionTokens) {
+        for (const [key, entry] of Object.entries(parsed.umaPermissionTokens)) {
+          const tokenEntry = entry as { token_type: string; access_token: string; expires_at?: number };
+          if (tokenEntry && tokenEntry.access_token) {
+            this.umaPermissionTokens.set(key, tokenEntry);
+          }
+        }
+        Logger.debug('Loaded token cache from disk', this.cacheFilePath);
       }
     } catch (e: any) {
       if (e?.code !== 'ENOENT') {
-        Logger.warn(`Auth cache load failed: ${e?.message ?? String(e)}`);
+        Logger.warn(`Token cache load failed: ${e?.message ?? String(e)}`);
       } else {
         Logger.debug('No existing cache file found at', this.cacheFilePath);
       }
@@ -67,23 +65,16 @@ export class Auth {
   private async saveCache(): Promise<void> {
     if (!this.cacheEnabled) return;
     const tmp = `${this.cacheFilePath}.tmp`;
-    const data = JSON.stringify(this.cache);
+    const obj: Record<string, any> = {};
+    for (const [key, entry] of this.umaPermissionTokens.entries()) {
+      obj[key] = entry;
+    }
+    const data = JSON.stringify({ umaPermissionTokens: obj });
     await fsp.writeFile(tmp, data, 'utf8');
     await fsp.rename(tmp, this.cacheFilePath);
-    Logger.debug('Saved cache to disk', this.cacheFilePath, {
-      asUriByOrigin: Object.keys(this.cache.asUriByOrigin).length,
-      uma2ConfigByAsUri: Object.keys(this.cache.uma2ConfigByAsUri).length,
-      publicResources: Object.keys(this.cache.publicResources).length,
+    Logger.debug('Saved token cache to disk', this.cacheFilePath, {
+      tokenCount: this.umaPermissionTokens.size
     });
-  }
-
-  private originFrom(input: string | URL | Request): string | undefined {
-    try {
-      const url = typeof input === 'string' ? new URL(input) : (input instanceof URL ? input : new URL((input as Request).url));
-      return url.origin;
-    } catch {
-      return undefined;
-    }
   }
 
   async init(): Promise<void> {
@@ -142,105 +133,160 @@ export class Auth {
     this.accessToken = accessTokenJson.access_token;
   }
 
-  private async createClaim(tokenEndpoint: string, ticket: string) {
-    if (!this.accessToken) {
-      throw new Error('Not initialized');
-    }
-    return {
-      grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
-      ticket,
-      claim_token: this.accessToken,
-      claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
-    };
-  }
+  private async fetchAccessToken(
+    tokenEndpoint: string,
+    request: string | Array<{ resource_id: string; resource_scopes: string[] }>,
+    claims?: Array<{ claim_token: string; claim_token_format: string }>
+  ): Promise<{
+    token?: string;
+    tokenType?: string;
+    expiresIn?: number;
+    error?: Error;
+    claimsUsed?: Array<{ claim_token: string; claim_token_format: string }>;
+  }> {
+    let content: any;
+    let claimsUsed = claims ? [...claims] : undefined;
 
-  // Direct UMA request without initial ticket using cached AS and UMA2 config
-  private readonly readScope = 'urn:example:css:modes:read';
-  private readonly createScope = 'urn:example:css:modes:create';
-  private readonly writeScope = 'urn:example:css:modes:write';
-  private readonly deleteScope = 'urn:example:css:modes:delete';
-
-  private resolveScopesForMethod(method: string | undefined): string[] {
-    switch ((method ?? 'GET').toUpperCase()) {
-      case 'GET':
-      case 'HEAD':
-        return [this.readScope];
-      case 'POST':
-        return [this.createScope];
-      case 'PUT':
-      case 'PATCH':
-        return [this.writeScope];
-      case 'DELETE':
-        return [this.deleteScope];
-      default:
-        return [this.readScope];
-    }
-  }
-
-  private async requestTokenWithoutTicket(resourceUrl: string, asUri: string, method?: string): Promise<{ token_type: string; access_token: string } | undefined> {
-    if (!this.accessToken) return undefined;
-
-    // Get UMA2 config (cache-aware)
-    const tokenEndpoint = await this.getTokenEndpoint(asUri);
-    if (!tokenEndpoint) return undefined;
-
-    // Remove fragment from resourceUrl for UMA resource_id
-    const sanitizedResourceId = resourceUrl.replace(/#.*/, '');
-    if (sanitizedResourceId !== resourceUrl) {
-      Logger.debug('Sanitized resource_id by removing fragment', { original: resourceUrl, sanitized: sanitizedResourceId });
+    if (claims) {
+      content = {
+        grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
+        claim_tokens: claims
+      };
+    } else {
+      content = {
+        grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
+        claim_token: this.accessToken,
+        claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
+      };
+      claimsUsed = [{
+        claim_token: this.accessToken!,
+        claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken'
+      }];
     }
 
-    const resource_scopes = this.resolveScopesForMethod(method);
-    Logger.debug('Attempting direct UMA token request', { resourceUrl: sanitizedResourceId, asUri, tokenEndpoint, method: method ?? 'GET', resource_scopes });
+    if (typeof request === 'string') {
+      content.ticket = request;
+    } else {
+      content.permissions = request;
+    }
 
-    const body = {
-      grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
-      permissions: [{
-        resource_id: sanitizedResourceId,
-        resource_scopes,
-      }],
-      claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
-      claim_token: this.accessToken
-    };
-
-    const res = await this.throttledFetch(tokenEndpoint, {
+    const asRequestResponse = await this.throttledFetch(tokenEndpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(content)
     });
-    if (!res.ok) {
-      Logger.debug('Direct UMA token request failed', tokenEndpoint, sanitizedResourceId, res.status);
-      return undefined;
+
+    if (asRequestResponse.status === 403) {
+      let asRequestResponseJson: any;
+      try {
+        asRequestResponseJson = await asRequestResponse.json();
+      } catch {
+        return {
+          error: new Error('403 without JSON body'),
+          token: undefined,
+          tokenType: undefined,
+          expiresIn: undefined,
+          claimsUsed
+        };
+      }
+
+      try {
+        claimsUsed = await this.gatherClaims(claimsUsed || [], asRequestResponseJson.required_claims);
+      } catch (e: any) {
+        return {
+          error: e,
+          token: undefined,
+          tokenType: undefined,
+          expiresIn: undefined,
+          claimsUsed
+        };
+      }
+
+      return this.fetchAccessToken(tokenEndpoint, asRequestResponseJson.ticket, claimsUsed);
     }
-    const json = await res.json();
-    if (json?.access_token && json?.token_type) {
-      Logger.debug('Direct UMA token request succeeded for resource', sanitizedResourceId);
-      return { token_type: json.token_type, access_token: json.access_token };
+
+    if (asRequestResponse.status !== 200) {
+      const text = await asRequestResponse.text();
+      return {
+        error: new Error(`Failed to fetch access token, error: ${text}`),
+        token: undefined,
+        tokenType: undefined,
+        expiresIn: undefined,
+        claimsUsed
+      };
     }
-    Logger.debug('Direct UMA token response missing token fields for resource', sanitizedResourceId);
-    return undefined;
+
+    const asResponse = await asRequestResponse.json();
+    return {
+      token: asResponse.access_token,
+      tokenType: asResponse.token_type,
+      expiresIn: asResponse.expires_in,
+      error: undefined,
+      claimsUsed
+    };
+  }
+
+  private async gatherClaims(
+    claims: Array<{ claim_token: string; claim_token_format: string }>,
+    requiredClaims: Array<any>
+  ): Promise<Array<{ claim_token: string; claim_token_format: string }>> {
+    for (const requiredClaim of requiredClaims) {
+      switch (requiredClaim['claim_token_format']) {
+        case 'urn:ietf:params:oauth:token-type:access_token':
+          const tokenEndpoint = requiredClaim.details.issuer + '/token';
+          const { token, error } = await this.fetchAccessToken(
+            tokenEndpoint,
+            [{
+              resource_id: requiredClaim.details.resource_id,
+              resource_scopes: requiredClaim.details.resource_scopes
+            }]
+          );
+          if (error) throw error;
+          claims.push({
+            claim_token: token!,
+            claim_token_format: 'urn:ietf:params:oauth:token-type:access_token'
+          });
+          break;
+        default:
+          throw new Error(`Unsupported claim token format: ${requiredClaim['claim_token_format']}`);
+      }
+    }
+    return claims;
+  }
+
+  // Token cache helpers
+  private buildUmaTokenKey(resourceUrl: string, method: string = 'GET'): string {
+    return `${method.toUpperCase()} ${resourceUrl}`;
+  }
+
+  private getStoredUmaToken(resourceUrl: string, method: string = 'GET') {
+    const key = this.buildUmaTokenKey(resourceUrl, method);
+    const entry = this.umaPermissionTokens.get(key);
+    if (!entry) return undefined;
+    return entry;
+  }
+
+  private async storeUmaToken(resourceUrl: string, method: string, token: { token_type: string; access_token: string; expires_in?: number }) {
+    const key = this.buildUmaTokenKey(resourceUrl, method);
+    this.umaPermissionTokens.set(key, {
+      token_type: token.token_type,
+      access_token: token.access_token
+    });
+    await this.saveCache();
   }
 
   private async getTokenEndpoint(asUri: string): Promise<string | undefined> {
-    // Return from cache if available
-    if (this.cacheEnabled && this.cache.uma2ConfigByAsUri[asUri]?.token_endpoint) {
-      Logger.debug('UMA2 config cache hit for AS', asUri);
-      return this.cache.uma2ConfigByAsUri[asUri].token_endpoint as string;
-    }
-    Logger.debug('UMA2 config cache miss for AS', asUri, 'fetching configuration');
-    // Fetch and cache
     const uma2ConfigResponse = await this.throttledFetch(`${asUri}/.well-known/uma2-configuration`);
     if (!uma2ConfigResponse.ok) {
       Logger.debug('Failed to fetch UMA2 configuration for AS', asUri, uma2ConfigResponse.status);
       return undefined;
     }
-    const uma2Config = await uma2ConfigResponse.json();
-    if (this.cacheEnabled) {
-      this.cache.uma2ConfigByAsUri[asUri] = uma2Config;
-      await this.saveCache();
-      Logger.debug('Cached UMA2 configuration for AS', asUri);
+    try {
+      const uma2Config = await uma2ConfigResponse.json();
+      return uma2Config.token_endpoint as string;
+    } catch {
+      return undefined;
     }
-    return uma2Config.token_endpoint as string;
   }
 
   private async acquireRequestSlot(): Promise<void> {
@@ -284,112 +330,81 @@ export class Auth {
     init?: RequestInit,
   ): Promise<Response> {
     const resourceUrl = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as Request).url);
-    Logger.debug('Fetch start', { resourceUrl, cacheEnabled: this.cacheEnabled });
+    const method = init?.method || 'GET';
+    Logger.debug('Fetch start', { resourceUrl, method });
 
-    // If resource is known to be public, fetch directly and skip UMA/cache steps
-    if (this.cacheEnabled && this.cache.publicResources[resourceUrl]) {
-      Logger.debug('Public resource cache HIT', resourceUrl);
-      const response = await this.throttledFetch(input, init);
+    // Check for cached UMA token
+    const existingUmaToken = this.getStoredUmaToken(resourceUrl, method);
+
+    if (existingUmaToken) {
+      const cachedInit: RequestInit = init ? { ...init } : {};
+      cachedInit.headers = {
+        ...(init?.headers as any),
+        Authorization: `${existingUmaToken.token_type} ${existingUmaToken.access_token}`
+      };
+      Logger.debug('Using cached UMA token for resource', resourceUrl);
+      const response = await this.throttledFetch(input, cachedInit);
       if (response.status !== 401) {
-        Logger.debug('Public resource confirmed (non-401)', resourceUrl, response.status);
+        Logger.debug('Cached token worked, status', response.status);
         return response;
       }
-      // Resource changed to protected; remove public marker and continue with normal flow
-      Logger.debug('Public resource now protected, removing marker', resourceUrl);
-      delete this.cache.publicResources[resourceUrl];
-      await this.saveCache();
+      // Cached token failed, remove it and retry
+      Logger.debug('Cached token failed with 401, removing from cache', resourceUrl);
+      this.umaPermissionTokens.delete(this.buildUmaTokenKey(resourceUrl, method));
     }
 
-    // Try direct UMA flow if cache is enabled and we know the AS for this origin
-    if (this.cacheEnabled) {
-      const origin = this.originFrom(input);
-      const asUri = origin ? this.cache.asUriByOrigin[origin] : undefined;
-      if (asUri) {
-        Logger.debug('AS URI cache HIT for origin', origin, '->', asUri);
-        try {
-          const method = (init?.method ?? 'GET');
-          const direct = await this.requestTokenWithoutTicket(resourceUrl, asUri, method);
-          if (direct) {
-            Logger.debug('Using direct UMA token for resource', resourceUrl);
-            const directInit: RequestInit = init ? { ...init } : {};
-            directInit.headers = { ...(init?.headers as any), Authorization: `${direct.token_type} ${direct.access_token}` };
-            return await this.throttledFetch(input, directInit);
-          }
-          Logger.debug('Direct UMA token unavailable, falling back to ticket flow', resourceUrl);
-        } catch (e: any) {
-          Logger.debug('Direct UMA attempt threw, falling back', e?.message ?? String(e));
-          // Fall back to normal flow
-        }
-      } else {
-        Logger.debug('AS URI cache MISS for origin', origin);
-      }
-    }
-
+    // Try without token or retry without cached token
     const response = await this.throttledFetch(input, init);
     if (response.status !== 401) {
-      // Mark as public to skip UMA/cache next time
-      if (this.cacheEnabled && !this.cache.publicResources[resourceUrl]) {
-        this.cache.publicResources[resourceUrl] = true;
-        await this.saveCache();
-        Logger.debug('Marked resource as public', resourceUrl);
-      } else {
-        Logger.debug('Resource accessible without auth (not caching or already cached as public)', resourceUrl);
-      }
+      Logger.debug('Resource accessible without auth, status', response.status);
       return response;
     }
+
+    // Handle UMA challenge
     const wwwAuthenticateHeader = response.headers.get("WWW-Authenticate");
     if (!wwwAuthenticateHeader) {
-      throw new Error(`Missing WWW-Authenticate header in 401 response ${resourceUrl}`);
+      Logger.debug('Missing WWW-Authenticate header in 401 response', resourceUrl);
+      return response;
     }
     const {as_uri, ticket} = Object.fromEntries(wwwAuthenticateHeader.replace(/^UMA /, '').split(', ').map(
       param => param.split('=').map(s => s.replace(/"/g, ''))
     ));
     Logger.debug('Received UMA challenge for resource', resourceUrl, 'AS:', as_uri);
 
-    // Cache the AS URI by resource origin
-    if (this.cacheEnabled) {
-      const origin = this.originFrom(input);
-      if (origin && this.cache.asUriByOrigin[origin] !== as_uri) {
-        this.cache.asUriByOrigin[origin] = as_uri;
-        await this.saveCache();
-        Logger.debug('Cached AS URI for origin', origin, '->', as_uri);
-      } else {
-        Logger.debug('AS URI for origin already cached or origin undefined', origin);
-      }
-    }
-
-    // Get UMA2 config (cache-aware)
+    // Get token endpoint
     const tokenEndpoint = await this.getTokenEndpoint(as_uri);
     if (!tokenEndpoint) {
       Logger.debug('Token endpoint unavailable for AS', as_uri, 'returning original 401 response');
       return response;
     }
 
-    const asRequestResponse = await this.throttledFetch(tokenEndpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(await this.createClaim(tokenEndpoint, ticket)),
+    // Fetch access token with claim gathering
+    const { token, tokenType, expiresIn, error } = await this.fetchAccessToken(tokenEndpoint, ticket);
+    if (error || !token || !tokenType) {
+      Logger.debug('Failed to fetch access token', error?.message);
+      return response;
+    }
+
+    // Store token in cache
+    this.storeUmaToken(resourceUrl, method, {
+      token_type: tokenType,
+      access_token: token,
+      expires_in: expiresIn
     });
-    if (!asRequestResponse.ok) {
-      Logger.debug('AS token request failed with status', asRequestResponse.status);
-      return asRequestResponse;
-    }
 
-    const asResponse: any = await asRequestResponse.json();
-    if (!init) {
-      init = {};
-    }
-    init.headers = {'Authorization': `${asResponse.token_type} ${asResponse.access_token}`};
+    // Retry with new token
+    const finalInit: RequestInit = init ? { ...init } : {};
+    finalInit.headers = {
+      ...(init?.headers as any),
+      Authorization: `${tokenType} ${token}`
+    };
 
-    Logger.debug('Retrying resource with AS token', resourceUrl);
-    return await this.throttledFetch(input, init);
+    Logger.debug('Retrying resource with new UMA token', resourceUrl);
+    return await this.throttledFetch(input, finalInit);
   }
 
   async sse(input: string, abortController: AbortController): Promise<EventEmitter> {
-    Logger.debug('SSE connection requested; cache bypassed intentionally', input);
-    // Intentionally do not use cache for SSE
+    Logger.debug('SSE connection requested', input);
     const response = await fetch(input, {
       method: 'GET',
       headers: {
@@ -409,25 +424,15 @@ export class Auth {
 
     const serviceEndpoint = response.headers.get("Link")?.match(/<([^>]+)>;\s*rel="service-token-endpoint"/)?.[1];
 
-    const uma2ConfigResponse = await fetch(`${as_uri}/.well-known/uma2-configuration`);
-    if (!uma2ConfigResponse.ok) {
-      throw new Error('cannot get UMA2 configuration' + await uma2ConfigResponse.text());
-    }
-    const uma2Config = await uma2ConfigResponse.json();
-    const tokenEndpoint = uma2Config.token_endpoint;
-
-    const asRequestResponse = await fetch(tokenEndpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(await this.createClaim(tokenEndpoint, ticket)),
-    });
-    if (!asRequestResponse.ok) {
-      throw new Error('cannot get AS response' + await asRequestResponse.text());
+    const tokenEndpoint = await this.getTokenEndpoint(as_uri);
+    if (!tokenEndpoint) {
+      throw new Error('cannot get UMA2 token endpoint');
     }
 
-    const asResponse: any = await asRequestResponse.json();
+    const { token, tokenType, error } = await this.fetchAccessToken(tokenEndpoint, ticket);
+    if (error || !token || !tokenType) {
+      throw new Error('cannot get AS response: ' + (error?.message ?? 'Unknown error'));
+    }
 
     if (!serviceEndpoint) {
       throw new Error('Missing UMA service endpoint for SSE');
@@ -437,7 +442,7 @@ export class Auth {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        'Authorization': `${asResponse.token_type} ${asResponse.access_token}`,
+        'Authorization': `${tokenType} ${token}`,
       },
       body: JSON.stringify({
         resource_url: input,
