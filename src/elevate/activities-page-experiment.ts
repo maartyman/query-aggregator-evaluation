@@ -13,17 +13,20 @@ import {AsyncIterator} from "asynciterator";
 
 const SelectedColumnsMap: Record<string, {
   keys: string[],
-  filterKeys: ({ key: string; relationKeyToValue: string; value: string | number | Date | boolean } | { requiredKeys: string[]; condition: string })[]
+  filterKeys: ({ key: string; relationKeyToValue: string; value: string | number | Date | boolean } | { requiredKeys: string[]; condition: string })[],
+  sort?: { key: string; ascending: boolean }
 }> = {
   "minimal": {
     keys: ["activity_startTime", "activity_name"],
     filterKeys: [],
+    sort: { key: "activity_startTime", ascending: true }
   },
   "normal": {
     keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance",
       "activity_stats_movingTime", "activity_stats_scores_stress_hrss"
     ],
     filterKeys: [],
+    sort: { key: "activity_startTime", ascending: true }
   },
   "complex": {
     keys: ["activity_startTime", "activity_name", "activity_laps", "activity_flags", "activity_type",
@@ -40,6 +43,38 @@ const SelectedColumnsMap: Record<string, {
       requiredKeys: ["activity_name"],
       condition: `REGEX(?activity_name, "Session", "i")`
     }],
+    sort: { key: "activity_startTime", ascending: true }
+  },
+  "fitness-trend": {
+    keys: [
+      "activity_name",
+      "activity_startTime",
+      "activity_type",
+      "activity_flags",
+      "activity_stats_scores_stress_trimp",
+      "activity_stats_scores_stress_hrss",
+      "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+      "activity_hasPowerMeter",
+      "activity_stats_scores_stress_pss",
+      "activity_athleteSnapshot_athleteSettings_runningFtp",
+      "activity_stats_scores_stress_rss",
+      "activity_athleteSnapshot_athleteSettings_swimFtp",
+      "activity_stats_scores_stress_sss"
+    ],
+    filterKeys: [],
+    sort: { key: "activity_startTime", ascending: true }
+  },
+  "year-progress": {
+    keys: [
+      "activity_startTime",
+      "activity_type",
+      "activity_trainer",
+      "activity_commute",
+      "activity_stats_distance",
+      "activity_stats_movingTime",
+      "activity_stats_elevationGain"
+    ],
+    filterKeys: []
   }
 }
 
@@ -74,10 +109,7 @@ async function runQueriesInWorker(
       sources: activitySources,
       keys: columnConfig.keys,
       filterKeys: columnConfig.filterKeys,
-      sort: {
-        key: "activity_startTime",
-        ascending: true
-      },
+      ...(columnConfig.sort && { sort: columnConfig.sort }),
       auth
     });
   };
@@ -154,10 +186,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       sources: activitySources,
       keys: columnConfig.keys,
       filterKeys: columnConfig.filterKeys,
-      sort: {
-        key: "activity_startTime",
-        ascending: true
-      },
+      ...(columnConfig.sort && { sort: columnConfig.sort }),
       aggregator: {
         enabled: true,
         podContext: podContext,
@@ -249,6 +278,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
           // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
+          await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
           for (const cache of ["none", "tokens", "indexed"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
@@ -288,8 +318,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
           for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
-
             const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
@@ -321,10 +349,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               sources: activitySources,
               keys: columnConfig.keys,
               filterKeys: columnConfig.filterKeys,
-              sort: {
-                key: "activity_startTime",
-                ascending: true
-              },
+              ...(columnConfig.sort && { sort: columnConfig.sort }),
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
@@ -381,4 +406,3 @@ if (!isMainThread && parentPort) {
       parentPort!.postMessage({ success: false, error: error.message });
     });
 }
-

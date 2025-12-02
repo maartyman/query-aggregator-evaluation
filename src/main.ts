@@ -9,8 +9,6 @@ import {Logger, type LogLevel} from './utils/logger';
 import {ActivityPageExperiment} from "./elevate/activity-page-experiment";
 import {getAggregatorIdStore} from "./utils/aggregator-id-store";
 import {ActivitiesPageExperiment} from "./elevate/activities-page-experiment";
-import {FitnessTrendPageExperiment} from "./elevate/fitness-trend-page-experiment";
-import {YearProgressPageExperiment} from "./elevate/year-progress-page-experiment";
 
 process.stdin.resume();
 
@@ -56,10 +54,10 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
       experiment = new ActivitiesPageExperiment(experimentLocation, experimentConfig);
       break;
     case "elevate-fitness-trend-page":
-      experiment = new FitnessTrendPageExperiment(experimentLocation, experimentConfig);
+      experiment = new ActivitiesPageExperiment(experimentLocation, experimentConfig);
       break;
     case "elevate-yearly-progression-page":
-      experiment = new YearProgressPageExperiment(experimentLocation, experimentConfig);
+      experiment = new ActivitiesPageExperiment(experimentLocation, experimentConfig);
       break;
     default:
       throw new Error(`Unknown experiment type: ${experimentConfig.type}`);
@@ -91,7 +89,6 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
   stopServers();
 }
 
-/*
 runExperiment("test-experiment-1", {
   "type": "watchparty-overview-page",
   "derivedClaims": false,
@@ -110,6 +107,7 @@ runExperiment("test-experiment-1", {
   console.error("Experiment failed: ", error);
 });
 
+/*
 runExperiment("test-experiment-2", {
   "type": "watchparty-watch-page",
   "derivedClaims": false,
@@ -149,7 +147,6 @@ runExperiment("test-experiment-3", {
   console.error("Experiment failed: ", error);
 });
 
-*/
 runExperiment("test-experiment-4", {
   "type": "elevate-activities-page",
   "derivedClaims": false,
@@ -180,7 +177,6 @@ runExperiment("test-experiment-4", {
   console.error("Experiment failed: ", error);
 });
 
-/*
 runExperiment("test-experiment-5", {
   "type": "elevate-fitness-trend-page",
   "derivedClaims": false,
@@ -188,9 +184,9 @@ runExperiment("test-experiment-5", {
     {
       "iterationName": "activities-count",
       "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10],
+        ["complex", "fitness-trend", 1],
+        ["complex", "fitness-trend", 5],
+        ["complex", "fitness-trend", 10],
       ]
     }
   ],
@@ -208,29 +204,9 @@ runExperiment("test-experiment-6", {
     {
       "iterationName": "activities-count",
       "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10],
-      ]
-    }
-  ],
-  "podsPerServer": 30
-}).then(() => {
-  console.log("Experiment completed");
-}).catch((error) => {
-  console.error("Experiment failed: ", error);
-});
-
-runExperiment("test-experiment-7", {
-  "type": "elevate-count",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "activities-count",
-      "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10],
+        ["complex", "year-progress", 1],
+        ["complex", "year-progress", 5],
+        ["complex", "year-progress", 10],
       ]
     }
   ],
