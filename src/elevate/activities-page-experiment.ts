@@ -9,6 +9,7 @@ import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
+import {AsyncIterator} from "asynciterator";
 
 const SelectedColumnsMap: Record<string, {
   keys: string[],
@@ -53,6 +54,11 @@ async function runQueriesInWorker(
   const activityDao = new ActivityDao();
 
   const runQuery = async () => {
+    await (<AsyncIterator<any>>await activityDao.count({
+      sources: activitySources,
+      auth
+    })).toArray();
+
     return await activityDao.find({
       sources: activitySources,
       keys: columnConfig.keys,
@@ -124,6 +130,15 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     const auth = new Auth(podContext, {enableCache: true});
     await auth.init();
     await auth.getAccessToken();
+    await activityDao.count({
+      sources: activitySources,
+      aggregator: {
+        enabled: true,
+        podContext: podContext,
+        enableCache: true
+      },
+      auth: auth
+    });
     await activityDao.find({
       sources: activitySources,
       keys: columnConfig.keys,
@@ -281,6 +296,15 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             }
 
             const activityDao = new ActivityDao();
+            await activityDao.count({
+              sources: activitySources,
+              aggregator: {
+                enabled: true,
+                podContext: this.podContext,
+                enableCache: cache !== "none"
+              },
+              auth
+            });
 
             const activities = await activityDao.find({
               sources: activitySources,

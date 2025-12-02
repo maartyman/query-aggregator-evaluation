@@ -11,7 +11,6 @@ import {getAggregatorIdStore} from "./utils/aggregator-id-store";
 import {ActivitiesPageExperiment} from "./elevate/activities-page-experiment";
 import {FitnessTrendPageExperiment} from "./elevate/fitness-trend-page-experiment";
 import {YearProgressPageExperiment} from "./elevate/year-progress-page-experiment";
-import {CountExperiment} from "./elevate/count-experiment";
 
 process.stdin.resume();
 
@@ -61,9 +60,6 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
       break;
     case "elevate-yearly-progression-page":
       experiment = new YearProgressPageExperiment(experimentLocation, experimentConfig);
-      break;
-    case "elevate-count":
-      experiment = new CountExperiment(experimentLocation, experimentConfig);
       break;
     default:
       throw new Error(`Unknown experiment type: ${experimentConfig.type}`);
