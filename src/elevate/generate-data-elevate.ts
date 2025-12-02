@@ -557,19 +557,7 @@ export class ElevateDataGenerator extends DataGenerator {
   }
 
   private getActivityName(activityType: ElevateSport): string {
-    const names = {
-      [ElevateSport.Ride]: ["Morning Cycling Training", "Afternoon Ride", "Evening Bike Session", "Hill Climb Training"],
-      [ElevateSport.VirtualRide]: ["Zwift Session", "Indoor Cycling Workout", "Virtual Training Ride"],
-      [ElevateSport.EBikeRide]: ["E-Bike Commute", "Electric Bike Ride", "Assisted Cycling"],
-      [ElevateSport.Run]: ["Morning Run", "Interval Training", "Long Run", "Speed Work"],
-      [ElevateSport.VirtualRun]: ["Treadmill Session", "Indoor Run", "Virtual Running Workout"],
-      [ElevateSport.Swim]: ["Pool Swimming", "Open Water Swim", "Swim Training"],
-      [ElevateSport.Hike]: ["Mountain Hike", "Trail Hiking", "Nature Walk"],
-      [ElevateSport.Walk]: ["Morning Walk", "Evening Stroll", "Recovery Walk"]
-    };
-
-    const options = names[activityType] || ["Training Session"];
-    return options[Math.floor(Math.random() * options.length)];
+    return "Training Session";
   }
 
   private getDeviceName(activityType: ElevateSport): string {

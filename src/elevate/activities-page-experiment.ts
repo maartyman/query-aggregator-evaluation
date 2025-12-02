@@ -20,14 +20,25 @@ const SelectedColumnsMap: Record<string, {
     filterKeys: [],
   },
   "normal": {
-    keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance", "activity_stats_movingTime", "activity_stats_scores_stress_hrss"],
+    keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance",
+      "activity_stats_movingTime", "activity_stats_scores_stress_hrss"
+    ],
     filterKeys: [],
   },
   "complex": {
-    keys: ["activity_startTime", "activity_name", "activity_laps", "activity_flags", "activity_type", "activity_stats_distance", "activity_stats_movingTime", "activity_stats_power_best20min", "activity_stats_scores_stress_pss", "activity_stats_scores_stress_pssPerHour", "activity_stats_heartRate_avg", "activity_stats_scores_stress_hrss", "activity_stats_scores_stress_hrssPerHour" ],
+    keys: ["activity_startTime", "activity_name", "activity_laps", "activity_flags", "activity_type",
+      "activity_stats_distance", "activity_stats_movingTime", "activity_stats_power_best20min",
+      "activity_stats_scores_stress_pss", "activity_stats_scores_stress_pssPerHour", "activity_stats_heartRate_avg",
+      "activity_stats_scores_stress_hrss", "activity_stats_scores_stress_hrssPerHour",
+      "activity_athleteSnapshot_athleteSettings_maxHr", "activity_athleteSnapshot_athleteSettings_restHr",
+      "activity_athleteSnapshot_athleteSettings_lthr_default", "activity_athleteSnapshot_athleteSettings_lthr_cycling",
+      "activity_athleteSnapshot_athleteSettings_lthr_running", "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+      "activity_athleteSnapshot_athleteSettings_runningFtp", "activity_athleteSnapshot_athleteSettings_swimFtp",
+      "activity_athleteSnapshot_athleteSettings_weight"
+    ],
     filterKeys: [{
       requiredKeys: ["activity_name"],
-      condition: `REGEX(?activity_name, "5", "i")`
+      condition: `REGEX(?activity_name, "Session", "i")`
     }],
   }
 }
