@@ -89,6 +89,7 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
   stopServers();
 }
 
+/*
 runExperiment("test-experiment-1", {
   "type": "watchparty-overview-page",
   "derivedClaims": false,
@@ -96,7 +97,31 @@ runExperiment("test-experiment-1", {
     {
       "iterationName": "number-of-joined-watchparties",
       "args": [
-        [1],
+        [5],
+        [10],
+        [15],
+        [20],
+      ]
+    }
+  ],
+  "podsPerServer": 30
+}).then(() => {
+  console.log("Experiment completed");
+}).catch((error) => {
+  console.error("Experiment failed: ", error);
+});
+*/
+
+runExperiment("test-experiment-2", {
+  "type": "watchparty-watch-page",
+  "derivedClaims": false,
+  "iterations": [
+    {
+      "iterationName": "number-of-joined-watchparties",
+      "args": [
+      // [ numberOfMembers, numberOfMessagesPerMember ]
+        [10, 1],
+        [1, 10],
       ]
     }
   ],
@@ -108,25 +133,6 @@ runExperiment("test-experiment-1", {
 });
 
 /*
-runExperiment("test-experiment-2", {
-  "type": "watchparty-watch-page",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "number-of-joined-watchparties",
-      "args": [
-      // [ numberOfMembers, numberOfMessagesPerMember ]
-        [10, 1],
-      ]
-    }
-  ],
-  "podsPerServer": 30
-}, "warn").then(() => {
-  console.log("Experiment completed");
-}).catch((error) => {
-  console.error("Experiment failed: ", error);
-});
-
 runExperiment("test-experiment-3", {
   "type": "elevate-activity-page",
   "derivedClaims": false,

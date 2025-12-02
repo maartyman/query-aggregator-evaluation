@@ -1,112 +1,105 @@
 {
-    "test-experiment-1": {
-        "type": "watchparty-overview-page",
-        "derivedClaims": false,
-        "iterations": [
-            {
-                "iterationName": "number-of-joined-watchparties",
-                "args": [
-                    [1]
-                ]
-            }
-        ],
-        "podsPerServer": 30
-    },
-    "test-experiment-2": {
-"type": "watchparty-watch-page",
-"derivedClaims": false,
-"iterations": [
-{
-"iterationName": "number-of-joined-watchparties",
-"args": [
-[10, 1]
-]
-}
-],
-"podsPerServer": 30
-},
-    "test-experiment-3": {
-  "type": "elevate-activity-page",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "activity-complexity",
-      "args": [
-        ["minimum"],
-        ["simple"],
-        ["complex"]
-      ]
-    }
-  ],
-  "podsPerServer": 30
-},
-    "test-experiment-4": {
-"type": "elevate-activities-page",
-"derivedClaims": false,
-"iterations": [
-{
-"iterationName": "activities-count",
-"args": [
-["minimal", "minimal", 1],
-["minimal", "minimal", 10],
-["minimal", "minimal", 20],
-["minimal", "minimal", 30]
-]
-},
-{
-  "iterationName": "activities-complexity",
-  "args": [
-    ["complex", "minimal", 10],
-    ["complex", "normal", 10],
-    ["complex", "complex", 10]
-  ]
-}
-],
-"podsPerServer": 30
-},
-"test-experiment-5": {
-  "type": "elevate-fitness-trend-page",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "activities-count",
-      "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10]
-      ]
-    }
-  ],
-  "podsPerServer": 30
-},
-"test-experiment-6": {
-  "type": "elevate-yearly-progression-page",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "activities-count",
-      "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10]
-      ]
-    }
-  ],
-  "podsPerServer": 30
-},
-"test-experiment-7": {
-  "type": "elevate-count",
-  "derivedClaims": false,
-  "iterations": [
-    {
-      "iterationName": "activities-count",
-      "args": [
-        ["complex", 1],
-        ["complex", 5],
-        ["complex", 10]
-      ]
-    }
-  ],
-  "podsPerServer": 30
-}
+  "test-experiment-1": {
+    "type": "watchparty-overview-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "number-of-joined-watchparties",
+        "args": [
+          [1]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-2": {
+    "type": "watchparty-watch-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "number-of-joined-watchparties",
+        "args": [
+          [10,1]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-3": {
+    "type": "elevate-activity-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "activity-complexity",
+        "args": [
+          ["minimum"],
+          ["simple"],
+          ["complex"]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-4": {
+    "type": "elevate-activities-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "activities-count",
+        "args": [
+          ["minimal","minimal",10],
+          ["minimal","minimal",20],
+          ["minimal","minimal",30]
+        ]
+      },
+      {
+        "iterationName": "activities-complexity",
+        "args": [
+          ["complex","minimal",10],
+          ["minimal","minimal",10],
+          ["complex","minimal",10]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-5": {
+    "type": "elevate-fitness-trend-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "activities-count",
+        "args": [
+          ["complex",5]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-6": {
+    "type": "elevate-yearly-progression-page",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "activities-count",
+        "args": [
+          ["complex",5]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  },
+  "test-experiment-7": {
+    "type": "elevate-count",
+    "derivedClaims": false,
+    "iterations": [
+      {
+        "iterationName": "activities-count",
+        "args": [
+          ["complex",5]
+        ]
+      }
+    ],
+    "podsPerServer": 30
+  }
 }
