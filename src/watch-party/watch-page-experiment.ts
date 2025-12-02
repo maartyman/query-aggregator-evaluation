@@ -1,4 +1,4 @@
-import {LinkTraversalMethod, WatchpartyDataGenerator} from "./generate-data-watchparty";
+import {WatchpartyDataGenerator} from "./generate-data-watchparty";
 import * as fs from "node:fs";
 import path from "node:path";
 import {Auth} from "../utils/auth";
@@ -75,7 +75,7 @@ _:RoomsQuery
     trans:sources ( _:MessageBoxesResultsSource ) .
 `;
 
-async function runQueriesInWorker(podContext: PodContext, room: string, linkTraversalMethod: LinkTraversalMethod, cache: CachingStrategy): Promise<ExperimentResult> {
+async function runQueriesInWorker(podContext: PodContext, room: string, cache: CachingStrategy): Promise<ExperimentResult> {
   const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
@@ -90,66 +90,36 @@ async function runQueriesInWorker(podContext: PodContext, room: string, linkTrav
 
     const creators = new Set();
     let resultIterator;
-    if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
-      resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.map(
-        (bindings) => {
+    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
+        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
           let messageboxUrl = bindings.get('messageBoxUrl')!.value;
-          return engine.queryBindings(
+          push(await engine.queryBindings(
             queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
             {
               sources: [messageboxUrl],
               fetch: auth.fetch.bind(auth)
-            }
-          );
+            }));
+          done();
         },
-      )).map(
-        (bindings) => {
-          const creator = bindings.get('creator')!.value;
-          if (creators.has(creator)) {
-            return null;
-          }
-          creators.add(creator);
-          return engine.queryBindings(
-            queryPerson.replace(/\$creator\$/g, `<${creator}>`),
-            {
-              sources: [creator],
-              fetch: auth.fetch.bind(auth)
-            }
-          );
-        },
-      )).filter((it) => it !== null);
-    } else {
-      resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
+      }))
+        .transform({
           transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-            let messageboxUrl = bindings.get('messageBoxUrl')!.value;
+            const creator = bindings.get('creator')!.value;
+            if (creators.has(creator)) {
+              return done();
+            }
+            creators.add(creator);
             push(await engine.queryBindings(
-              queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
+              queryPerson.replace(/\$creator\$/g, `<${creator}>`),
               {
-                sources: [messageboxUrl],
+                sources: [creator],
                 fetch: auth.fetch.bind(auth)
-              }));
+              }
+            ));
             done();
           },
-        }))
-          .transform({
-            transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-              const creator = bindings.get('creator')!.value;
-              if (creators.has(creator)) {
-                return done();
-              }
-              creators.add(creator);
-              push(await engine.queryBindings(
-                queryPerson.replace(/\$creator\$/g, `<${creator}>`),
-                {
-                  sources: [creator],
-                  fetch: auth.fetch.bind(auth)
-                }
-              ));
-              done();
-            },
-          })
-      );
-    }
+        })
+    );
     return resultIterator;
   }
 
@@ -163,7 +133,7 @@ async function runQueriesInWorker(podContext: PodContext, room: string, linkTrav
   const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + linkTraversalMethod + "_" + cache,
+    podContext.name + "_" + cache,
     startTime,
     resultIterator
   );
@@ -193,43 +163,42 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
           for (const cache of ["none", "tokens", "indexed"]) {
-            for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
-              Logger.info(`Running experiment for pod ${podName}, link traversal method ${linkTraversalMethod}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-              const result = await new Promise<ExperimentResult>((resolve, reject) => {
-                const worker = new Worker(__filename, {
-                  workerData: {podContext, roomName: this.room, linkTraversalMethod, cache}
-                });
-
-                worker.on('message', (message) => {
-                  if (message.success) {
-                    const experimentResult = ExperimentResult.deserialize(message.result);
-                    results.push(experimentResult);
-                    if (saveResults) {
-                      experimentResult.print();
-                    }
-                    resolve(experimentResult);
-                  } else {
-                    //console.error(`Worker failed for ${podName}:`, message.error);
-                    reject(new Error(message.error));
-                  }
-                  worker.terminate();
-                });
-
-                worker.on('error', (error) => {
-                  console.error(`Worker error for ${podContext.name}:`, error);
-                  reject(error);
-                });
-
-                worker.on('exit', (code) => {
-                  if (code !== 0) {
-                    //console.error(`Worker stopped with exit code ${code}`);
-                  }
-                });
+            Logger.info(`Running experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            const result = await new Promise<ExperimentResult>((resolve, reject) => {
+              const worker = new Worker(__filename, {
+                workerData: {podContext, roomName: this.room, cache}
               });
 
-              await new Promise(resolve => setTimeout(resolve, 100));
-            }
+              worker.on('message', (message) => {
+                if (message.success) {
+                  const experimentResult = ExperimentResult.deserialize(message.result);
+                  results.push(experimentResult);
+                  if (saveResults) {
+                    experimentResult.print();
+                  }
+                  resolve(experimentResult);
+                } else {
+                  //console.error(`Worker failed for ${podName}:`, message.error);
+                  reject(new Error(message.error));
+                }
+                worker.terminate();
+              });
+
+              worker.on('error', (error) => {
+                console.error(`Worker error for ${podContext.name}:`, error);
+                reject(error);
+              });
+
+              worker.on('exit', (code) => {
+                if (code !== 0) {
+                  //console.error(`Worker stopped with exit code ${code}`);
+                }
+              });
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
+
           for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext);
@@ -401,7 +370,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
-  runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.linkTraversalMethod, workerData.cache)
+  runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.cache)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })

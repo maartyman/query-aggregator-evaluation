@@ -1,5 +1,3 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import {DataGenerator, PodContext, ServerDistributionOptions} from "../data-generator";
 
 // generates multiple pods with the necessary triples related to the watch party use case
@@ -63,11 +61,6 @@ import {DataGenerator, PodContext, ServerDistributionOptions} from "../data-gene
     <http://schema.org/attendee> <http://localhost:8000/user1/profile/card#me>, <http://localhost:8000/user2/profile/card#me>;
     <http://schema.org/subjectOf> <http://localhost:8000/user1/watchparties/myMessages/MSGhttpspodplaygroundsolidlabbeuser1watchpartiesmyroomsels2025-09-25t125000168zroom3d21648f-e362-494f-87b2-6bf9d52ca3ab#outbox>, <http://localhost:8000/user2/watchparties/myMessages/MSGhttpspodplaygroundsolidlabbeuser1watchpartiesmyroomsels2025-09-25t125000168zroom3d21648f-e362-494f-87b2-6bf9d52ca3ab#outbox>.
 */
-
-export enum LinkTraversalMethod {
-    DepthFirst = "DepthFirst",
-    BreadthFirst = "BreadthFirst",
-}
 
 export class WatchpartyDataGenerator extends DataGenerator {
     protected queryUser;
