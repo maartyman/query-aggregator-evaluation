@@ -8,57 +8,68 @@ import {Auth} from "../utils/auth";
 import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
+import {CachingStrategy} from "../utils/caching-strategy";
 
 async function runQueriesInWorker(
   podContext: PodContext,
   activityLocations: string[],
-  cache: boolean
+  cache: CachingStrategy
 ): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
 
-  // Build activity IRIs from locations
   const activitySources = activityLocations.map(location =>
     `${podContext.baseUrl}/activities/${location}`
   );
 
   const activityDao = new ActivityDao();
 
-  const startTime = process.hrtime();
+  const runQuery = async () => {
+    return await activityDao.find({
+      sources: activitySources,
+      keys: [
+        "activity_name",
+        "activity_startTime",
+        "activity_type",
+        "activity_flags",
+        "activity_stats_scores_stress_trimp",
+        "activity_stats_scores_stress_hrss",
+        "activity_athleteSnapshot_athleteSettings_cyclingFtp",
+        "activity_hasPowerMeter",
+        "activity_stats_scores_stress_pss",
+        "activity_athleteSnapshot_athleteSettings_runningFtp",
+        "activity_stats_scores_stress_rss",
+        "activity_athleteSnapshot_athleteSettings_swimFtp",
+        "activity_stats_scores_stress_sss"
+      ],
+      sort: {
+        key: "activity_startTime",
+        ascending: true
+      },
+      auth
+    });
+  };
 
-  const resultIterator = await activityDao.find({
-    sources: activitySources,
-    keys: [
-      "activity_name",
-      "activity_startTime",
-      "activity_type",
-      "activity_flags",
-      "activity_stats_scores_stress_trimp",
-      "activity_stats_scores_stress_hrss",
-      "activity_athleteSnapshot_athleteSettings_cyclingFtp",
-      "activity_hasPowerMeter",
-      "activity_stats_scores_stress_pss",
-      "activity_athleteSnapshot_athleteSettings_runningFtp",
-      "activity_stats_scores_stress_rss",
-      "activity_athleteSnapshot_athleteSettings_swimFtp",
-      "activity_stats_scores_stress_sss"
-    ],
-    sort: {
-      key: "activity_startTime",
-      ascending: true
-    },
-    auth
-  });
+  if (cache === "indexed") {
+    const it = await runQuery();
+    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
+      it.destroy();
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  const startTime = process.hrtime();
+  const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + cache,
     startTime,
     resultIterator
   );
 }
 
-export class FitnessTrendScreenExperiment extends ElevateDataGenerator implements Experiment {
+export class FitnessTrendPageExperiment extends ElevateDataGenerator implements Experiment {
   protected queryUser: string;
   private podContext?: PodContext;
 
@@ -204,7 +215,7 @@ export class FitnessTrendScreenExperiment extends ElevateDataGenerator implement
           // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of [false, true]) {
+          for (const cache of ["none", "tokens", "indexed"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const worker = new Worker(__filename, {
@@ -238,11 +249,13 @@ export class FitnessTrendScreenExperiment extends ElevateDataGenerator implement
             });
 
             await new Promise(resolve => setTimeout(resolve, 100));
+          }
 
+          for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocations);
 
-            const auth = new Auth(this.podContext, {enableCache: cache});
+            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
@@ -279,7 +292,7 @@ export class FitnessTrendScreenExperiment extends ElevateDataGenerator implement
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache
+                enableCache: cache !== "none"
               },
               auth
             });
@@ -306,7 +319,7 @@ export class FitnessTrendScreenExperiment extends ElevateDataGenerator implement
             };
 
             const aggregatorResult = ExperimentResult.fromJson(
-              this.podContext.name + "_aggregator_" + (cache ? "cache" : "no-cache"),
+              this.podContext.name + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson
             );
@@ -332,3 +345,4 @@ if (!isMainThread && parentPort) {
       parentPort!.postMessage({ success: false, error: error.message });
     });
 }
+

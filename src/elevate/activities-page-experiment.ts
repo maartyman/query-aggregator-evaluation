@@ -8,47 +8,82 @@ import {Auth} from "../utils/auth";
 import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
+import {CachingStrategy} from "../utils/caching-strategy";
+
+const SelectedColumnsMap: Record<string, {
+  keys: string[],
+  filterKeys: ({ key: string; relationKeyToValue: string; value: string | number | Date | boolean } | { requiredKeys: string[]; condition: string })[]
+}> = {
+  "minimal": {
+    keys: ["activity_startTime", "activity_name"],
+    filterKeys: [],
+  },
+  "normal": {
+    keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance", "activity_stats_movingTime", "activity_stats_scores_stress_hrss"],
+    filterKeys: [],
+  },
+  "complex": {
+    keys: ["activity_startTime", "activity_name", "activity_laps", "activity_flags", "activity_type", "activity_stats_distance", "activity_stats_movingTime", "activity_stats_power_best20min", "activity_stats_scores_stress_pss", "activity_stats_scores_stress_pssPerHour", "activity_stats_heartRate_avg", "activity_stats_scores_stress_hrss", "activity_stats_scores_stress_hrssPerHour" ],
+    filterKeys: [{
+      requiredKeys: ["activity_name"],
+      condition: `REGEX(?activity_name, "5", "i")`
+    }],
+  }
+}
 
 async function runQueriesInWorker(
   podContext: PodContext,
   activityLocations: string[],
-  cache: boolean
+  selectedColumns: string,
+  cache: CachingStrategy
 ): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
 
-  // Build activity IRIs from locations
+  const columnConfig = SelectedColumnsMap[selectedColumns];
+  if (!columnConfig) {
+    throw new Error(`Unknown selected columns config: ${selectedColumns}`);
+  }
+
   const activitySources = activityLocations.map(location =>
     `${podContext.baseUrl}/activities/${location}`
   );
 
   const activityDao = new ActivityDao();
 
-  const startTime = process.hrtime();
+  const runQuery = async () => {
+    return await activityDao.find({
+      sources: activitySources,
+      keys: columnConfig.keys,
+      filterKeys: columnConfig.filterKeys,
+      sort: {
+        key: "activity_startTime",
+        ascending: true
+      },
+      auth
+    });
+  };
 
-  const resultIterator = await activityDao.find({
-    sources: activitySources,
-    keys: [
-      "activity_startTime",
-      "activity_type",
-      "activity_trainer",
-      "activity_commute",
-      "activity_stats_distance",
-      "activity_stats_movingTime",
-      "activity_stats_elevationGain"
-    ],
-    auth
-  });
+  if (cache === "indexed") {
+    const it = await runQuery();
+    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
+      it.destroy();
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  const startTime = process.hrtime();
+  const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + selectedColumns + "_" + cache,
     startTime,
     resultIterator
   );
 }
 
-export class YearProgressScreenExperiment extends ElevateDataGenerator implements Experiment {
+export class ActivitiesPageExperiment extends ElevateDataGenerator implements Experiment {
   protected queryUser: string;
   private podContext?: PodContext;
 
@@ -64,12 +99,18 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
 
   private async setupAggregator(
     podContext: PodContext,
-    activityLocations: string[]
+    activityLocations: string[],
+    selectedColumns: string
   ): Promise<void> {
     // Check if we already have an aggregator service for this query
-    const cacheKey = `${podContext.name}_${activityLocations.length}`;
+    const cacheKey = `${podContext.name}_${selectedColumns}_${activityLocations.length}`;
     if (this.aggregatorIdStore.has(cacheKey)) {
       return;
+    }
+
+    const columnConfig = SelectedColumnsMap[selectedColumns];
+    if (!columnConfig) {
+      throw new Error(`Unknown selected columns config: ${selectedColumns}`);
     }
 
     // Build activity sources from locations
@@ -85,15 +126,12 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
     await auth.getAccessToken();
     await activityDao.find({
       sources: activitySources,
-      keys: [
-        "activity_startTime",
-        "activity_type",
-        "activity_trainer",
-        "activity_commute",
-        "activity_stats_distance",
-        "activity_stats_movingTime",
-        "activity_stats_elevationGain"
-      ],
+      keys: columnConfig.keys,
+      filterKeys: columnConfig.filterKeys,
+      sort: {
+        key: "activity_startTime",
+        ascending: true
+      },
       aggregator: {
         enabled: true,
         podContext: podContext,
@@ -112,9 +150,10 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
     // Generate data in a dedicated pod per argument collection
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
-        // arg[0] = complexity, arg[1] = numberOfActivities
+        // arg[0] = complexity, arg[1] = selectedColumns, arg[2] = numberOfActivities
         const complexity = arg[0];
-        const numberOfActivities = arg[1];
+        const selectedColumns = arg[1];
+        const numberOfActivities = arg[2];
 
         const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
         const experimentId = `${iteration.iterationName}-${optionValues}`;
@@ -167,9 +206,10 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
-          // arg[0] = complexity, arg[1] = numberOfActivities
+          // arg[0] = complexity, arg[1] = selectedColumns, arg[2] = numberOfActivities
           const complexity = arg[0];
-          const numberOfActivities = arg[1];
+          const selectedColumns = arg[1];
+          const numberOfActivities = arg[2];
 
           // Generate pod name matching the structure used in generate()
           const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
@@ -184,11 +224,11 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
           // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of [false, true]) {
-            Logger.info(`Running experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+          for (const cache of ["none", "tokens", "indexed"]) {
+            Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const worker = new Worker(__filename, {
-                workerData: {podContext: this.podContext, activityLocations, cache}
+                workerData: {podContext: this.podContext, activityLocations, selectedColumns, cache}
               });
 
               worker.on('message', (message) => {
@@ -218,11 +258,13 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
             });
 
             await new Promise(resolve => setTimeout(resolve, 100));
+          }
 
-            Logger.info(`Running experiment for pod ${this.podContext.name}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await this.setupAggregator(this.podContext, activityLocations);
+          for (const cache of ["none", "tokens"]) {
+            Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
-            const auth = new Auth(this.podContext, {enableCache: cache});
+            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
@@ -233,23 +275,25 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
               `${this.podContext!.baseUrl}/activities/${location}`
             );
 
+            const columnConfig = SelectedColumnsMap[selectedColumns];
+            if (!columnConfig) {
+              throw new Error(`Unknown selected columns config: ${selectedColumns}`);
+            }
+
             const activityDao = new ActivityDao();
 
             const activities = await activityDao.find({
               sources: activitySources,
-              keys: [
-                "activity_startTime",
-                "activity_type",
-                "activity_trainer",
-                "activity_commute",
-                "activity_stats_distance",
-                "activity_stats_movingTime",
-                "activity_stats_elevationGain"
-              ],
+              keys: columnConfig.keys,
+              filterKeys: columnConfig.filterKeys,
+              sort: {
+                key: "activity_startTime",
+                ascending: true
+              },
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache
+                enableCache: cache !== "none"
               },
               auth
             });
@@ -276,7 +320,7 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
             };
 
             const aggregatorResult = ExperimentResult.fromJson(
-              this.podContext.name + "_aggregator_" + (cache ? "cache" : "no-cache"),
+              this.podContext.name + "_" + selectedColumns + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson
             );
@@ -294,7 +338,7 @@ export class YearProgressScreenExperiment extends ElevateDataGenerator implement
 }
 
 if (!isMainThread && parentPort) {
-  runQueriesInWorker(workerData.podContext, workerData.activityLocations, workerData.cache)
+  runQueriesInWorker(workerData.podContext, workerData.activityLocations, workerData.selectedColumns, workerData.cache)
     .then((result: ExperimentResult) => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })
@@ -302,3 +346,4 @@ if (!isMainThread && parentPort) {
       parentPort!.postMessage({ success: false, error: error.message });
     });
 }
+

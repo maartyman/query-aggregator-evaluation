@@ -4,12 +4,13 @@ import path from "node:path";
 import {isMainThread, parentPort, Worker, workerData} from 'worker_threads';
 import {Auth} from '../utils/auth';
 import {QueryEngine} from '@comunica/query-sparql';
-import {UnionIterator} from "asynciterator";
+import {AsyncIterator, UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
 import {createAggregatorService, getAggregatorService, waitForAggregatorService} from "../utils/aggregator-functions";
 import {ExperimentSetup, PodContext} from "../data-generator";
 import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
+import {CachingStrategy} from "../utils/caching-strategy";
 
 const queryMessageLocations = `PREFIX ldp: <http://www.w3.org/ns/ldp#>
 SELECT ?messageLocations WHERE {
@@ -76,66 +77,80 @@ _:RoomsQuery
     trans:sources ( _:MessageBoxesResultsSource ) .
 `;
 
-async function runQueriesInWorker(podContext: PodContext, linkTraversalMethod: LinkTraversalMethod, cache: boolean): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+async function runQueriesInWorker(
+  podContext: PodContext,
+  linkTraversalMethod: LinkTraversalMethod,
+  cache: CachingStrategy
+): Promise<ExperimentResult> {
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
   const engine = new QueryEngine();
 
-  const startTime = process.hrtime();
+  const runQuery = async (): Promise<AsyncIterator<any>> => {
+    const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
+      sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
+      fetch: auth.fetch.bind(auth)
+    });
 
-  const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
-    sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
-    fetch: auth.fetch.bind(auth)
-  });
-
-  let resultIterator: any;
-  if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.map(
-      (bindings) => {
-        return engine.queryBindings(queryMessageBoxes, {
-          sources: [bindings.get('messageLocations')!.value],
-          fetch: auth.fetch.bind(auth)
-        });
-      }
-    )).map(
-      (bindings) => {
-        const room = bindings.get('roomUrl')!.value;
-        return engine.queryBindings(
-          queryRooms,
-          {
-            sources: [room],
+    let resultIterator: any;
+    if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
+      resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.map(
+        (bindings) => {
+          return engine.queryBindings(queryMessageBoxes, {
+            sources: [bindings.get('messageLocations')!.value],
             fetch: auth.fetch.bind(auth)
-          }
-        );
-      },
-    ));
-  } else {
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.transform({
-      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-        push(await engine.queryBindings(queryMessageBoxes, {
-          sources: [bindings.get('messageLocations')!.value],
-          fetch: auth.fetch.bind(auth)
-        }));
-        done();
-      },
-    })).transform({
-      transform: async (bindings, done, push) => {
-        const room = bindings.get('roomUrl')!.value;
-        push(await engine.queryBindings(
-          queryRooms,
-          {
-            sources: [room],
+          });
+        }
+      )).map(
+        (bindings) => {
+          const room = bindings.get('roomUrl')!.value;
+          return engine.queryBindings(
+            queryRooms,
+            {
+              sources: [room],
+              fetch: auth.fetch.bind(auth)
+            }
+          );
+        },
+      ));
+    } else {
+      resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.transform({
+        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+          push(await engine.queryBindings(queryMessageBoxes, {
+            sources: [bindings.get('messageLocations')!.value],
             fetch: auth.fetch.bind(auth)
-          }
-        ));
-        done();
-      },
-    }));
+          }));
+          done();
+        },
+      })).transform({
+        transform: async (bindings, done, push) => {
+          const room = bindings.get('roomUrl')!.value;
+          push(await engine.queryBindings(
+            queryRooms,
+            {
+              sources: [room],
+              fetch: auth.fetch.bind(auth)
+            }
+          ));
+          done();
+        },
+      }));
+    }
+    return resultIterator;
   }
 
+  if (cache === "indexed") {
+    const it = await runQuery();
+    it.destroy();
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  const startTime = process.hrtime();
+
+  const resultIterator = await runQuery();
+
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + linkTraversalMethod + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + linkTraversalMethod + "_" + cache,
     startTime,
     resultIterator
   );
@@ -150,7 +165,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
-          for (const cache of [false, true]) {
+          for (const cache of ["none", "tokens", "indexed"]) {
             for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
               Logger.info(`Running experiment for pod ${podName}, link traversal method ${linkTraversalMethod}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
               const result = await new Promise<ExperimentResult>((resolve, reject) => {
@@ -187,17 +202,19 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
               await new Promise(resolve => setTimeout(resolve, 100));
             }
+          }
+          for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext);
 
-            const auth = new Auth(podContext, {enableCache: cache});
+            const auth = new Auth(podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
             const startTime = process.hrtime();
 
             const aggregatorResult = ExperimentResult.fromJson(
-              podContext.name + "_aggregator_" + (cache? "cache" : "no-cache"),
+              podContext.name + "_aggregator_" + cache,
               startTime,
               await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
             );

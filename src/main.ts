@@ -6,12 +6,11 @@ import {OverviewPageExperiment} from "./watch-party/overview-page-experiment";
 import {WatchPageExperiment} from "./watch-party/watch-page-experiment";
 import {Auth} from "./utils/auth";
 import {Logger, type LogLevel} from './utils/logger';
-import {ActivityScreenExperiment} from "./elevate/activity-screen-experiment";
-import {ElevateSport} from "./elevate/utils/elevate-types";
+import {ActivityPageExperiment} from "./elevate/activity-page-experiment";
 import {getAggregatorIdStore} from "./utils/aggregator-id-store";
-import {ActivitiesScreenExperiment} from "./elevate/activities-screen-experiment";
-import {FitnessTrendScreenExperiment} from "./elevate/fitness-trend-screen-experiment";
-import {YearProgressScreenExperiment} from "./elevate/year-progress-screen-experiment";
+import {ActivitiesPageExperiment} from "./elevate/activities-page-experiment";
+import {FitnessTrendPageExperiment} from "./elevate/fitness-trend-page-experiment";
+import {YearProgressPageExperiment} from "./elevate/year-progress-page-experiment";
 import {CountExperiment} from "./elevate/count-experiment";
 
 process.stdin.resume();
@@ -51,17 +50,17 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
     case "watchparty-watch-page":
       experiment = new WatchPageExperiment(experimentLocation, experimentConfig);
       break;
-    case "elevate-activity-screen":
-      experiment = new ActivityScreenExperiment(experimentLocation, experimentConfig);
+    case "elevate-activity-page":
+      experiment = new ActivityPageExperiment(experimentLocation, experimentConfig);
       break;
-    case "elevate-activities-screen":
-      experiment = new ActivitiesScreenExperiment(experimentLocation, experimentConfig);
+    case "elevate-activities-page":
+      experiment = new ActivitiesPageExperiment(experimentLocation, experimentConfig);
       break;
-    case "elevate-fitness-trend-screen":
-      experiment = new FitnessTrendScreenExperiment(experimentLocation, experimentConfig);
+    case "elevate-fitness-trend-page":
+      experiment = new FitnessTrendPageExperiment(experimentLocation, experimentConfig);
       break;
-    case "elevate-yearly-progression-screen":
-      experiment = new YearProgressScreenExperiment(experimentLocation, experimentConfig);
+    case "elevate-yearly-progression-page":
+      experiment = new YearProgressPageExperiment(experimentLocation, experimentConfig);
       break;
     case "elevate-count":
       experiment = new CountExperiment(experimentLocation, experimentConfig);
@@ -133,17 +132,15 @@ runExperiment("test-experiment-2", {
 }).catch((error) => {
   console.error("Experiment failed: ", error);
 });
-*/
 
-/*
 runExperiment("test-experiment-3", {
-  "type": "elevate-activity-screen",
+  "type": "elevate-activity-page",
   "derivedClaims": false,
   "iterations": [
     {
       "iterationName": "activity-complexity",
       "args": [
-        ["minimum"],
+        ["minimal"],
         ["simple"],
         ["complex"]
       ]
@@ -155,22 +152,22 @@ runExperiment("test-experiment-3", {
 }).catch((error) => {
   console.error("Experiment failed: ", error);
 });
- */
 
+*/
 runExperiment("test-experiment-4", {
-  "type": "elevate-activities-screen",
+  "type": "elevate-activities-page",
   "derivedClaims": false,
   "iterations": [
     {
       "iterationName": "activities-count",
       "args": [
-        ["minimal", "minimal", 1],
         ["minimal", "minimal", 10],
         ["minimal", "minimal", 20],
         ["minimal", "minimal", 30],
+        ["minimal", "minimal", 40],
+        ["minimal", "minimal", 50],
       ]
     },
-    /*
     {
       "iterationName": "activities-complexity",
       "args": [
@@ -179,7 +176,6 @@ runExperiment("test-experiment-4", {
         ["complex", "complex", 10],
       ]
     }
-     */
   ],
   "podsPerServer": 30
 }).then(() => {
@@ -190,7 +186,7 @@ runExperiment("test-experiment-4", {
 
 /*
 runExperiment("test-experiment-5", {
-  "type": "elevate-fitness-trend-screen",
+  "type": "elevate-fitness-trend-page",
   "derivedClaims": false,
   "iterations": [
     {
@@ -210,7 +206,7 @@ runExperiment("test-experiment-5", {
 });
 
 runExperiment("test-experiment-6", {
-  "type": "elevate-yearly-progression-screen",
+  "type": "elevate-yearly-progression-page",
   "derivedClaims": false,
   "iterations": [
     {

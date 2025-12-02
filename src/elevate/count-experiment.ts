@@ -8,32 +8,43 @@ import {Auth} from "../utils/auth";
 import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
+import {CachingStrategy} from "../utils/caching-strategy";
 
 async function runQueriesInWorker(
   podContext: PodContext,
   activityLocations: string[],
-  cache: boolean
+  cache: CachingStrategy
 ): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
 
-  // Build activity IRIs from locations
   const activitySources = activityLocations.map(location =>
     `${podContext.baseUrl}/activities/${location}`
   );
 
   const activityDao = new ActivityDao();
 
-  const startTime = process.hrtime();
+  const runQuery = async () => {
+    return await activityDao.count({
+      sources: activitySources,
+      auth
+    });
+  };
 
-  const resultIterator = await activityDao.count({
-    sources: activitySources,
-    auth
-  });
+  if (cache === "indexed") {
+    const it = await runQuery();
+    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
+      it.destroy();
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  const startTime = process.hrtime();
+  const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + cache,
     startTime,
     resultIterator
   );
@@ -166,7 +177,7 @@ export class CountExperiment extends ElevateDataGenerator implements Experiment 
           // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of [false, true]) {
+          for (const cache of ["none", "tokens", "indexed"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const worker = new Worker(__filename, {
@@ -200,11 +211,13 @@ export class CountExperiment extends ElevateDataGenerator implements Experiment 
             });
 
             await new Promise(resolve => setTimeout(resolve, 100));
+          }
 
+          for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocations);
 
-            const auth = new Auth(this.podContext, {enableCache: cache});
+            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
@@ -222,7 +235,7 @@ export class CountExperiment extends ElevateDataGenerator implements Experiment 
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache
+                enableCache: cache !== "none"
               },
               auth
             });
@@ -249,7 +262,7 @@ export class CountExperiment extends ElevateDataGenerator implements Experiment 
             };
 
             const aggregatorResult = ExperimentResult.fromJson(
-              this.podContext.name + "_aggregator_" + (cache ? "cache" : "no-cache"),
+              this.podContext.name + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson
             );

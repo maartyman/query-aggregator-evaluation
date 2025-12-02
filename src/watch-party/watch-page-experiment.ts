@@ -9,6 +9,8 @@ import {ExperimentResult} from "../utils/result-builder";
 import {createAggregatorService, getAggregatorService, waitForAggregatorService} from "../utils/aggregator-functions";
 import {ExperimentSetup, PodContext} from "../data-generator";
 import type {Experiment} from "../experiment";
+import {Logger} from "../utils/logger";
+import {CachingStrategy} from "../utils/caching-strategy";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
 SELECT ?messageBoxUrl
@@ -73,84 +75,95 @@ _:RoomsQuery
     trans:sources ( _:MessageBoxesResultsSource ) .
 `;
 
-async function runQueriesInWorker(podContext: PodContext, room: string, linkTraversalMethod: LinkTraversalMethod, cache: boolean): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+async function runQueriesInWorker(podContext: PodContext, room: string, linkTraversalMethod: LinkTraversalMethod, cache: CachingStrategy): Promise<ExperimentResult> {
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
   const engine = new QueryEngine();
 
-  const startTime = process.hrtime();
-  const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
-  const roomBindingsStream = await engine.queryBindings(queryRoom, {
-    sources: [roomIri],
-    fetch: auth.fetch.bind(auth)
-  });
+  const runQuery = async () => {
+    const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
+    const roomBindingsStream = await engine.queryBindings(queryRoom, {
+      sources: [roomIri],
+      fetch: auth.fetch.bind(auth)
+    });
 
-  const creators = new Set();
-  let resultIterator;
-  if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.map(
-      (bindings) => {
-        let messageboxUrl = bindings.get('messageBoxUrl')!.value;
-        return engine.queryBindings(
-          queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
-          {
-            sources: [messageboxUrl],
-            fetch: auth.fetch.bind(auth)
-          }
-        );
-      },
-    )).map(
-      (bindings) => {
-        const creator = bindings.get('creator')!.value;
-        if (creators.has(creator)) {
-          return null;
-        }
-        creators.add(creator);
-        return engine.queryBindings(
-          queryPerson.replace(/\$creator\$/g, `<${creator}>`),
-          {
-            sources: [creator],
-            fetch: auth.fetch.bind(auth)
-          }
-        );
-      },
-    )).filter((it) => it !== null);
-  } else {
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
-        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+    const creators = new Set();
+    let resultIterator;
+    if (linkTraversalMethod === LinkTraversalMethod.BreadthFirst) {
+      resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.map(
+        (bindings) => {
           let messageboxUrl = bindings.get('messageBoxUrl')!.value;
-          push(await engine.queryBindings(
+          return engine.queryBindings(
             queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
             {
               sources: [messageboxUrl],
               fetch: auth.fetch.bind(auth)
-            }));
-          done();
-        },
-      }))
-        .transform({
-          transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-            const creator = bindings.get('creator')!.value;
-            if (creators.has(creator)) {
-              return done();
             }
-            creators.add(creator);
+          );
+        },
+      )).map(
+        (bindings) => {
+          const creator = bindings.get('creator')!.value;
+          if (creators.has(creator)) {
+            return null;
+          }
+          creators.add(creator);
+          return engine.queryBindings(
+            queryPerson.replace(/\$creator\$/g, `<${creator}>`),
+            {
+              sources: [creator],
+              fetch: auth.fetch.bind(auth)
+            }
+          );
+        },
+      )).filter((it) => it !== null);
+    } else {
+      resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
+          transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+            let messageboxUrl = bindings.get('messageBoxUrl')!.value;
             push(await engine.queryBindings(
-              queryPerson.replace(/\$creator\$/g, `<${creator}>`),
+              queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
               {
-                sources: [creator],
+                sources: [messageboxUrl],
                 fetch: auth.fetch.bind(auth)
-              }
-            ));
+              }));
             done();
           },
-        })
-    );
+        }))
+          .transform({
+            transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+              const creator = bindings.get('creator')!.value;
+              if (creators.has(creator)) {
+                return done();
+              }
+              creators.add(creator);
+              push(await engine.queryBindings(
+                queryPerson.replace(/\$creator\$/g, `<${creator}>`),
+                {
+                  sources: [creator],
+                  fetch: auth.fetch.bind(auth)
+                }
+              ));
+              done();
+            },
+          })
+      );
+    }
+    return resultIterator;
   }
 
+  if (cache === "indexed") {
+    const it = await runQuery();
+    it.destroy();
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  const startTime = process.hrtime();
+
+  const resultIterator = await runQuery();
+
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + linkTraversalMethod + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + linkTraversalMethod + "_" + cache,
     startTime,
     resultIterator
   );
@@ -179,8 +192,9 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
-          for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
-            for (const cache of [false, true]) {
+          for (const cache of ["none", "tokens", "indexed"]) {
+            for (const linkTraversalMethod of [LinkTraversalMethod.DepthFirst, LinkTraversalMethod.BreadthFirst]) {
+              Logger.info(`Running experiment for pod ${podName}, link traversal method ${linkTraversalMethod}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
               const result = await new Promise<ExperimentResult>((resolve, reject) => {
                 const worker = new Worker(__filename, {
                   workerData: {podContext, roomName: this.room, linkTraversalMethod, cache}
@@ -195,7 +209,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
                     }
                     resolve(experimentResult);
                   } else {
-                    console.error(`Worker failed for ${podContext.name}:`, message.error);
+                    //console.error(`Worker failed for ${podName}:`, message.error);
                     reject(new Error(message.error));
                   }
                   worker.terminate();
@@ -208,32 +222,36 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
                 worker.on('exit', (code) => {
                   if (code !== 0) {
-                    //console.error(`Worker ${workerName} stopped with exit code ${code}`);
+                    //console.error(`Worker stopped with exit code ${code}`);
                   }
                 });
               });
+
               await new Promise(resolve => setTimeout(resolve, 100));
             }
           }
-          await this.setupAggregator(podContext);
+          for (const cache of ["none", "tokens"]) {
+            Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            await this.setupAggregator(podContext);
 
-          const auth = new Auth(podContext, {enableCache: true});
-          await auth.init();
-          await auth.getAccessToken();
+            const auth = new Auth(podContext, {enableCache: cache !== "none"});
+            await auth.init();
+            await auth.getAccessToken();
 
-          const startTime = process.hrtime();
+            const startTime = process.hrtime();
 
-          const aggregatorReult = ExperimentResult.fromJson(
-            podContext.name + "_aggregator",
-            startTime,
-            await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
-          );
-          results.push(aggregatorReult);
-          if (saveResults) {
-            aggregatorReult.print();
+            const aggregatorResult = ExperimentResult.fromJson(
+              podContext.name + "_aggregator_" + cache,
+              startTime,
+              await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
+            );
+            results.push(aggregatorResult);
+            if (saveResults) {
+              aggregatorResult.print();
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
-
-          await new Promise(resolve => setTimeout(resolve, 100));
         }
       }
     }

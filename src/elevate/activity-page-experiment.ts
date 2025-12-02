@@ -8,31 +8,41 @@ import {Auth} from "../utils/auth";
 import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
+import {CachingStrategy} from "../utils/caching-strategy";
 
-async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: boolean): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: cache});
+async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy): Promise<ExperimentResult> {
+  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
   await auth.init();
   await auth.getAccessToken();
 
-  // The activity is stored at: podBaseUrl/activities/activityLocation
-  // The activity IRI is: podBaseUrl/activities/activityLocation#activity
   const activityUrl = `${podContext.baseUrl}/activities/${activityLocation}`;
   const activityIri = `${activityUrl}#activity`;
 
   const activityDao = new ActivityDao();
 
-  const startTime = process.hrtime();
+  const runQuery = async () => {
+    return await activityDao.getById(activityIri, { auth });
+  };
 
-  const resultIterator = await activityDao.getById(activityIri, { auth });
+  if (cache === "indexed") {
+    const it = await runQuery();
+    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
+      it.destroy();
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  const startTime = process.hrtime();
+  const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
-    podContext.name + "_" + activityLocation + "_" + (cache ? "cache" : "no-cache"),
+    podContext.name + "_" + activityLocation + "_" + cache,
     startTime,
     resultIterator
   );
 }
 
-export class ActivityScreenExperiment extends ElevateDataGenerator implements Experiment {
+export class ActivityPageExperiment extends ElevateDataGenerator implements Experiment {
   protected queryUser: string;
   private podContext?: PodContext;
 
@@ -136,7 +146,7 @@ export class ActivityScreenExperiment extends ElevateDataGenerator implements Ex
 
           // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
-          for (const cache of [false, true]) {
+          for (const cache of ["none", "tokens", "indexed"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const worker = new Worker(__filename, {
@@ -170,11 +180,13 @@ export class ActivityScreenExperiment extends ElevateDataGenerator implements Ex
             });
 
             await new Promise(resolve => setTimeout(resolve, 100));
+          }
 
+          for (const cache of ["none", "tokens"]) {
             Logger.info(`Running experiment for pod ${this.podContext.name}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocation);
 
-            const auth = new Auth(this.podContext, {enableCache: cache});
+            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
@@ -189,7 +201,7 @@ export class ActivityScreenExperiment extends ElevateDataGenerator implements Ex
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache
+                enableCache: cache !== "none"
               },
               auth
             });
@@ -216,7 +228,7 @@ export class ActivityScreenExperiment extends ElevateDataGenerator implements Ex
             };
 
             const aggregatorResult = ExperimentResult.fromJson(
-              this.podContext.name + "_" + activityLocation + "_aggregator_" + (cache ? "cache" : "no-cache"),
+              this.podContext.name + "_" + activityLocation + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson
             );
@@ -242,3 +254,4 @@ if (!isMainThread && parentPort) {
       parentPort!.postMessage({ success: false, error: error.message });
     });
 }
+
