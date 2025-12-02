@@ -5,6 +5,8 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import {Logger} from './logger';
 
+let saveCacheLock: Promise<void> = Promise.resolve();
+
 export class Auth {
   private readonly podContext: PodContext;
   private readonly cssBase: string;
@@ -64,17 +66,22 @@ export class Auth {
 
   private async saveCache(): Promise<void> {
     if (!this.cacheEnabled) return;
-    const tmp = `${this.cacheFilePath}.tmp`;
-    const obj: Record<string, any> = {};
-    for (const [key, entry] of this.umaPermissionTokens.entries()) {
-      obj[key] = entry;
-    }
-    const data = JSON.stringify({ umaPermissionTokens: obj });
-    await fsp.writeFile(tmp, data, 'utf8');
-    await fsp.rename(tmp, this.cacheFilePath);
-    Logger.debug('Saved token cache to disk', this.cacheFilePath, {
-      tokenCount: this.umaPermissionTokens.size
+
+    saveCacheLock = saveCacheLock.then(async () => {
+      const tmp = `${this.cacheFilePath}.tmp`;
+      const obj: Record<string, any> = {};
+      for (const [key, entry] of this.umaPermissionTokens.entries()) {
+        obj[key] = entry;
+      }
+      const data = JSON.stringify({ umaPermissionTokens: obj });
+      await fsp.writeFile(tmp, data, 'utf8');
+      await fsp.rename(tmp, this.cacheFilePath);
+      Logger.debug('Saved token cache to disk', this.cacheFilePath, {
+        tokenCount: this.umaPermissionTokens.size
+      });
     });
+
+    await saveCacheLock;
   }
 
   async init(): Promise<void> {
