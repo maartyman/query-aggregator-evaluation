@@ -30,11 +30,16 @@ process.on('SIGUSR2', exitHandler);
 // catches uncaught exceptions
 process.on('uncaughtException', exitHandler);
 
-async function runExperiment(experimentName: string, experimentConfig: any, debug?: string) {
-  // Configure logger level based on debug flag
-  if (debug) {
-    const level = (debug.toLowerCase() as LogLevel);
-    Logger.setLevel(level);
+export interface LoggingOptions {
+  experiment?: LogLevel;
+  aggregator?: string;
+  uma?: string;
+  css?: string;
+}
+
+async function runExperiment(experimentName: string, experimentConfig: any, loggingOptions?: LoggingOptions) {
+  if (loggingOptions?.experiment) {
+    Logger.setLevel(loggingOptions.experiment);
   }
 
   const experimentLocation = path.resolve(`./experiment-data/${experimentName}`);
@@ -77,7 +82,7 @@ async function runExperiment(experimentName: string, experimentConfig: any, debu
     experimentConfig.derivedClaims,
     setup.servers,
     setup.queryUser,
-    debug
+    loggingOptions
   );
 
   getAggregatorIdStore().clear()

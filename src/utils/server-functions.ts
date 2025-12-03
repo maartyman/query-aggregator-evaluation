@@ -1,6 +1,7 @@
 import {exec, spawn} from "node:child_process";
 import path from "node:path";
 import {PodContext, ServerInstanceContext} from "../data-generator";
+import type {LoggingOptions} from "../main";
 
 let trackedServers: ServerInstanceContext[] = [];
 
@@ -64,7 +65,7 @@ export async function startServers(
   derivedAuth: boolean,
   servers: ServerInstanceContext[],
   queryUser: PodContext,
-  debug?: string
+  loggingOptions?: LoggingOptions
 ): Promise<void> {
   trackedServers = servers;
 
@@ -78,8 +79,9 @@ export async function startServers(
 
   for (const server of servers) {
     console.log(`Starting UMA server-${server.index} on port ${server.umaPort}...`);
-    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${derivedAuth? "./config/derivation.json" : "./config/default.json"} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${debug?? 'error'}`;
-    runCommand(command, `UMA-${server.index}`, debug !== undefined);
+    const umaLogLevel = loggingOptions?.uma ?? 'error';
+    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${derivedAuth? "./config/derivation.json" : "./config/default.json"} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}`;
+    runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
   }
 
   console.log("waiting 2 seconds before starting CSS servers...");
@@ -88,8 +90,9 @@ export async function startServers(
   for (const server of servers) {
     console.log(`Starting CSS server-${server.index} on port ${server.solidPort}...`);
     const serverDataPath = path.join(dataLocation, server.relativePath);
-    const command = `cd "${cssLocation}" && yarn run community-solid-server -m . -c ./config/default.json -a ${server.umaBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${debug?? 'error'}`;
-    runCommand(command, `CSS-${server.index}`, debug !== undefined);
+    const cssLogLevel = loggingOptions?.css ?? 'error';
+    const command = `cd "${cssLocation}" && yarn run community-solid-server -m . -c ./config/default.json -a ${server.umaBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
+    runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
   }
 
   console.log("waiting 15 seconds before starting aggregator...");
@@ -118,7 +121,8 @@ export async function startServers(
   }
 
   console.log("Starting aggregator...");
-  runCommand(`cd "${aggregatorLocation}" && go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${debug?? 'error'}`, "AGGREGATOR", debug !== undefined);
+  const aggregatorLogLevel = loggingOptions?.aggregator ?? 'error';
+  runCommand(`cd "${aggregatorLocation}" && go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${aggregatorLogLevel}`, "AGGREGATOR", loggingOptions?.aggregator !== undefined);
 
   console.log("waiting 3 seconds for servers to start...");
   await new Promise(resolve => setTimeout(resolve, 3000));
