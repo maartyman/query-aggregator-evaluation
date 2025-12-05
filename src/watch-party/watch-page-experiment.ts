@@ -11,6 +11,7 @@ import {ExperimentSetup, PodContext} from "../data-generator";
 import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
+import {IndexedStore} from "../utils/indexed-store";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
 SELECT ?messageBoxUrl
@@ -81,56 +82,81 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
   await auth.getAccessToken();
   const engine = new QueryEngine();
 
-  const runQuery = async () => {
-    const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
-    const roomBindingsStream = await engine.queryBindings(queryRoom, {
-      sources: [roomIri],
-      fetch: auth.fetch.bind(auth)
-    });
-
-    const creators = new Set();
-    let resultIterator;
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
-        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-          let messageboxUrl = bindings.get('messageBoxUrl')!.value;
-          push(await engine.queryBindings(
-            queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
-            {
-              sources: [messageboxUrl],
-              fetch: auth.fetch.bind(auth)
-            }));
-          done();
-        },
-      }))
-        .transform({
-          transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-            const creator = bindings.get('creator')!.value;
-            if (creators.has(creator)) {
-              return done();
-            }
-            creators.add(creator);
-            push(await engine.queryBindings(
-              queryPerson.replace(/\$creator\$/g, `<${creator}>`),
-              {
-                sources: [creator],
-                fetch: auth.fetch.bind(auth)
-              }
-            ));
-            done();
-          },
-        })
-    );
-    return resultIterator;
-  }
-
   if (cache === "indexed") {
-    const it = await runQuery();
-    it.destroy();
-    await new Promise(resolve => setTimeout(resolve, 500));
+    const store = new IndexedStore();
+    const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
+    await store.add([roomIri], auth.fetch.bind(auth));
+
+    const messageBoxLocations = await (await engine.queryBindings(queryRoom, {
+      sources: [ store.store ],
+    })).map((bindings) => bindings.get('messageBoxUrl')!.value).toArray()
+    await store.add(messageBoxLocations, auth.fetch.bind(auth));
+
+    const creatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
+      sources: [ store.store ],
+    })).map((bindings) => bindings.get('creator')!.value).toArray()
+    await store.add(creatorLocations, auth.fetch.bind(auth));
+
+    const startTime = process.hrtime();
+    await (await engine.queryBindings(queryRoom, {
+      sources: [ store.store ],
+    }))
+      .toArray();
+    await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
+      sources: [ store.store ],
+    }))
+      .toArray();
+    const resultIterator = await engine.queryBindings(queryPerson, {
+      sources: [ store.store ],
+    })
+
+    return await ExperimentResult.fromIterator(
+      podContext.name + "_" + cache,
+      startTime,
+      resultIterator
+    );
   }
+
   const startTime = process.hrtime();
 
-  const resultIterator = await runQuery();
+  const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
+  const roomBindingsStream = await engine.queryBindings(queryRoom, {
+    sources: [roomIri],
+    fetch: auth.fetch.bind(auth)
+  });
+
+  const creators = new Set();
+  let resultIterator;
+  resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
+      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+        let messageboxUrl = bindings.get('messageBoxUrl')!.value;
+        push(await engine.queryBindings(
+          queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
+          {
+            sources: [messageboxUrl],
+            fetch: auth.fetch.bind(auth)
+          }));
+        done();
+      },
+    }))
+      .transform({
+        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+          const creator = bindings.get('creator')!.value;
+          if (creators.has(creator)) {
+            return done();
+          }
+          creators.add(creator);
+          push(await engine.queryBindings(
+            queryPerson,
+            {
+              sources: [creator],
+              fetch: auth.fetch.bind(auth)
+            }
+          ));
+          done();
+        },
+      })
+  );
 
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + cache,
@@ -154,7 +180,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     return this.finalizeGeneration(queryUserContext);
   }
 
-  async run(saveResults: boolean, iterations: number): Promise<void> {
+  async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
@@ -163,22 +189,19 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
           for (const cache of ["none", "tokens", "indexed"]) {
-            Logger.info(`Running experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             const result = await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {podContext, roomName: this.room, cache}
+                workerData: {logLevel, podContext, roomName: this.room, cache}
               });
 
               worker.on('message', (message) => {
                 if (message.success) {
                   const experimentResult = ExperimentResult.deserialize(message.result);
                   results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
-                  }
                   resolve(experimentResult);
                 } else {
-                  //console.error(`Worker failed for ${podName}:`, message.error);
                   reject(new Error(message.error));
                 }
                 worker.terminate();
@@ -198,9 +221,23 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
+        }
+      }
+    }
+    return results;
+  }
+
+  async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    const results: ExperimentResult[] = [];
+
+    for (let iteration = 0; iteration < iterations; iteration++) {
+      for (const iterationConfig of this.experimentConfig.iterations) {
+        for (const arg of iterationConfig.args) {
+          const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
+          const podContext = this.getPodContextByName(podName);
 
           for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running aggregator experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext);
 
             const auth = new Auth(podContext, {enableCache: cache !== "none"});
@@ -215,15 +252,13 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
               await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
             );
             results.push(aggregatorResult);
-            if (saveResults) {
-              aggregatorResult.print();
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
+    return results;
   }
 
   private async setupAggregator(podContext: PodContext) {
@@ -243,6 +278,9 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     const messageBoxesId = await createAggregatorService(auth, fnoConfMessages.replace(
       "$MessageLocationsQueryResultLocation$",
       `http://localhost:5000/${roomInfoId}/`
+    ).replace(
+      "$messageBoxUrl$",
+      "?messageBox"
     ));
     await waitForAggregatorService(auth, messageBoxesId);
 
@@ -370,6 +408,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
+  Logger.setLevel(workerData.logLevel);
   runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.cache)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });

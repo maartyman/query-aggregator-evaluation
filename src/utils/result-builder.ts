@@ -9,6 +9,7 @@ export class ExperimentResult {
   public dief10s: number; // Diefficiency at 10 seconds
   public timestamps: [number, number][]; // [timestamp_ms, cumulative_count] pairs
   public totalResults: number;
+  public parameters?: Record<string, any>;
 
   constructor(
     experimentId: string,
@@ -17,7 +18,8 @@ export class ExperimentResult {
     dief1s: number,
     dief10s: number,
     timestamps: [number, number][],
-    totalResults: number
+    totalResults: number,
+    parameters?: Record<string, any>
   ) {
     this.experimentId = experimentId;
     this.totalDuration = totalDuration;
@@ -26,6 +28,7 @@ export class ExperimentResult {
     this.dief10s = dief10s;
     this.timestamps = timestamps;
     this.totalResults = totalResults;
+    this.parameters = parameters;
   }
 
   /**
@@ -44,7 +47,8 @@ export class ExperimentResult {
       obj.dief1s,
       obj.dief10s,
       obj.timestamps,
-      obj.totalResults
+      obj.totalResults,
+      obj.parameters
     );
   }
 
@@ -83,7 +87,8 @@ export class ExperimentResult {
   public static async fromIterator(
     experimentId: string,
     startTime: [number, number],
-    resultIterator: any
+    resultIterator: any,
+    parameters?: Record<string, any>
   ): Promise<ExperimentResult> {
     let timestamps: [number,number][] = [];
 
@@ -108,7 +113,8 @@ export class ExperimentResult {
           this.calculateDiefficiency(timestamps, [1,0]), // 1s
           this.calculateDiefficiency(timestamps, [10,0]), // 10s
           timestamps,
-          timestamps.length
+          timestamps.length,
+          parameters
         ));
       });
 
@@ -125,7 +131,8 @@ export class ExperimentResult {
   public static fromJson(
     experimentId: string,
     startTime: [number, number],
-    jsonResult: any
+    jsonResult: any,
+    parameters?: Record<string, any>
   ): ExperimentResult {
     const endTime = process.hrtime(startTime);
     const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
@@ -146,7 +153,8 @@ export class ExperimentResult {
       this.calculateDiefficiency(timestamps, [1,0]), // 1s
       this.calculateDiefficiency(timestamps, [10,0]), // 10s
       timestamps,
-      timestamps.length
+      timestamps.length,
+      parameters
     );
   }
 

@@ -11,6 +11,10 @@ const levelOrder: Record<Exclude<LogLevel, 'silent'>, number> = {
 class LoggerClass {
   private level: LogLevel = 'error';
 
+  getLevel() {
+    return this.level;
+  }
+
   setLevel(level: LogLevel) {
     this.level = level;
   }

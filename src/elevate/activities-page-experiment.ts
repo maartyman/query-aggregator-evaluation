@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {AsyncIterator} from "asynciterator";
+import {IndexedStore} from "../utils/indexed-store";
 
 const SelectedColumnsMap: Record<string, {
   keys: string[],
@@ -99,6 +100,35 @@ async function runQueriesInWorker(
 
   const activityDao = new ActivityDao();
 
+  if (cache === "indexed") {
+    const store = new IndexedStore();
+    await store.add(activitySources, auth.fetch.bind(auth));
+    await store.add(["https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
+
+    const startTime = process.hrtime();
+
+    await (<AsyncIterator<any>>await activityDao.count({
+      sources: [store.store] as any,
+      auth
+    })).toArray();
+
+    const resultIterator = await activityDao.find({
+      sources: [store.store] as any,
+      keys: columnConfig.keys,
+      filterKeys: columnConfig.filterKeys,
+      ...(columnConfig.sort && { sort: columnConfig.sort }),
+      auth
+    });
+
+    return await ExperimentResult.fromIterator(
+      podContext.name + "_" + selectedColumns + "_" + cache,
+      startTime,
+      resultIterator
+    );
+  }
+
+  const startTime = process.hrtime();
+
   const runQuery = async () => {
     await (<AsyncIterator<any>>await activityDao.count({
       sources: activitySources,
@@ -114,15 +144,6 @@ async function runQueriesInWorker(
     });
   };
 
-  if (cache === "indexed") {
-    const it = await runQuery();
-    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
-      it.destroy();
-    }
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-
-  const startTime = process.hrtime();
   const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
@@ -255,45 +276,38 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     return queryUserContext;
   }
 
-  async run(saveResults: boolean, iterations: number): Promise<void> {
+  async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
-          // arg[0] = complexity, arg[1] = selectedColumns, arg[2] = numberOfActivities
           const complexity = arg[0];
           const selectedColumns = arg[1];
           const numberOfActivities = arg[2];
 
-          // Generate pod name matching the structure used in generate()
           const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
           const experimentId = `${iterationConfig.iterationName}-${optionValues}`;
 
-          // Build activity locations array
           const activityLocations: string[] = [];
           for (let i = 0; i < numberOfActivities; i++) {
             activityLocations.push(`activity-${i}`);
           }
 
-          // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
-          await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
           for (const cache of ["none", "tokens", "indexed"]) {
-            Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running local experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {podContext: this.podContext, activityLocations, selectedColumns, cache}
+                workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache}
               });
 
               worker.on('message', (message) => {
                 if (message.success) {
                   const experimentResult = ExperimentResult.deserialize(message.result);
                   results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
-                  }
                   resolve(experimentResult);
                 } else {
                   reject(new Error(message.error));
@@ -315,16 +329,41 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
+        }
+      }
+    }
+    return results;
+  }
+
+  async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    const results: ExperimentResult[] = [];
+
+    for (let iteration = 0; iteration < iterations; iteration++) {
+      for (const iterationConfig of this.experimentConfig.iterations) {
+        for (const arg of iterationConfig.args) {
+          const complexity = arg[0];
+          const selectedColumns = arg[1];
+          const numberOfActivities = arg[2];
+
+          const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
+          const experimentId = `${iterationConfig.iterationName}-${optionValues}`;
+
+          const activityLocations: string[] = [];
+          for (let i = 0; i < numberOfActivities; i++) {
+            activityLocations.push(`activity-${i}`);
+          }
+
+          this.podContext = this.getUserPodContext(this.queryUser, experimentId);
+          await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
           for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
             await auth.init();
             await auth.getAccessToken();
 
             const startTime = process.hrtime();
 
-            // Query multiple activities using aggregator
             const activitySources = activityLocations.map(location =>
               `${this.podContext!.baseUrl}/activities/${location}`
             );
@@ -358,12 +397,10 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               auth
             });
 
-            // Convert activities result to JSON format for result builder
             const aggregatorResultJson = {
               results: {
                 bindings: Array.isArray(activities)
                   ? activities.map((activity: any) => {
-                    // Convert Activity object to JSON bindings format
                     const binding: any = {};
                     for (const [key, value] of Object.entries(activity)) {
                       if (value !== null && value !== undefined) {
@@ -385,19 +422,18 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               aggregatorResultJson
             );
             results.push(aggregatorResult);
-            if (saveResults) {
-              aggregatorResult.print();
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
+    return results;
   }
 }
 
 if (!isMainThread && parentPort) {
+  Logger.setLevel(workerData.logLevel);
   runQueriesInWorker(workerData.podContext, workerData.activityLocations, workerData.selectedColumns, workerData.cache)
     .then((result: ExperimentResult) => {
       parentPort!.postMessage({ success: true, result: result.serialize() });

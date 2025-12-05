@@ -11,6 +11,7 @@ import {ExperimentSetup, PodContext} from "../data-generator";
 import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
+import {IndexedStore} from "../utils/indexed-store";
 
 const queryMessageLocations = `PREFIX ldp: <http://www.w3.org/ns/ldp#>
 SELECT ?messageLocations WHERE {
@@ -86,47 +87,74 @@ async function runQueriesInWorker(
   await auth.getAccessToken();
   const engine = new QueryEngine();
 
-  const runQuery = async (): Promise<AsyncIterator<any>> => {
-    const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
-      sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
-      fetch: auth.fetch.bind(auth)
+  if (cache === "indexed") {
+    const store = new IndexedStore();
+    await store.add([`${podContext.baseUrl}/watchparties/myMessages/`], auth.fetch.bind(auth));
+
+    const messageLocations = await (await engine.queryBindings(queryMessageLocations, {
+      sources: [ store.store ],
+    }))
+      .map((bindings) => bindings.get('messageLocations')!.value)
+      .toArray()
+    await store.add(messageLocations, auth.fetch.bind(auth));
+
+    const roomLocations = await (await engine.queryBindings(queryMessageBoxes, {
+      sources: [ store.store ],
+    }))
+      .map((bindings) => bindings.get('roomUrl')!.value)
+      .toArray()
+    await store.add(roomLocations, auth.fetch.bind(auth));
+
+    const startTime = process.hrtime();
+    await (await engine.queryBindings(queryMessageLocations, {
+      sources: [ store.store ],
+    }))
+      .toArray()
+    await (await engine.queryBindings(queryMessageBoxes, {
+      sources: [ store.store ],
+    }))
+      .toArray()
+    const resultIterator: AsyncIterator<any> = await engine.queryBindings(queryRooms, {
+      sources: [ store.store ],
     });
 
-    let resultIterator: any;
-
-    resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.transform({
-      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
-        push(await engine.queryBindings(queryMessageBoxes, {
-          sources: [bindings.get('messageLocations')!.value],
-          fetch: auth.fetch.bind(auth)
-        }));
-        done();
-      },
-    })).transform({
-      transform: async (bindings, done, push) => {
-        const room = bindings.get('roomUrl')!.value;
-        push(await engine.queryBindings(
-          queryRooms,
-          {
-            sources: [room],
-            fetch: auth.fetch.bind(auth)
-          }
-        ));
-        done();
-      },
-    }));
-
-    return resultIterator;
+    return await ExperimentResult.fromIterator(
+      podContext.name + "_" + cache,
+      startTime,
+      resultIterator
+    );
   }
 
-  if (cache === "indexed") {
-    const it = await runQuery();
-    it.destroy();
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
   const startTime = process.hrtime();
 
-  const resultIterator = await runQuery();
+  const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
+    sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
+    fetch: auth.fetch.bind(auth)
+  });
+
+  let resultIterator: any;
+
+  resultIterator = new UnionIterator<any>(new UnionIterator<any>(messageLocationsBindingsStream.transform({
+    transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+      push(await engine.queryBindings(queryMessageBoxes, {
+        sources: [bindings.get('messageLocations')!.value],
+        fetch: auth.fetch.bind(auth)
+      }));
+      done();
+    },
+  })).transform({
+    transform: async (bindings, done, push) => {
+      const room = bindings.get('roomUrl')!.value;
+      push(await engine.queryBindings(
+        queryRooms,
+        {
+          sources: [room],
+          fetch: auth.fetch.bind(auth)
+        }
+      ));
+      done();
+    },
+  }));
 
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + cache,
@@ -136,7 +164,7 @@ async function runQueriesInWorker(
 }
 
 export class OverviewPageExperiment extends WatchpartyDataGenerator implements Experiment {
-  async run(saveResults: boolean, iterations: number): Promise<void> {
+  async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
@@ -145,22 +173,19 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
           for (const cache of ["none", "tokens", "indexed"]) {
-            Logger.info(`Running experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            const result = await new Promise<ExperimentResult>((resolve, reject) => {
+            Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {podContext, cache}
+                workerData: {logLevel, podContext, cache}
               });
 
               worker.on('message', (message) => {
                 if (message.success) {
                   const experimentResult = ExperimentResult.deserialize(message.result);
                   results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
-                  }
                   resolve(experimentResult);
                 } else {
-                  //console.error(`Worker failed for ${podName}:`, message.error);
                   reject(new Error(message.error));
                 }
                 worker.terminate();
@@ -180,9 +205,23 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
+        }
+      }
+    }
+    return results;
+  }
+
+  async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    const results: ExperimentResult[] = [];
+
+    for (let iteration = 0; iteration < iterations; iteration++) {
+      for (const iterationConfig of this.experimentConfig.iterations) {
+        for (const arg of iterationConfig.args) {
+          const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
+          const podContext = this.getPodContextByName(podName);
 
           for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running experiment for pod ${podName}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running aggregator experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext);
 
             const auth = new Auth(podContext, {enableCache: cache !== "none"});
@@ -197,15 +236,13 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
               await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
             );
             results.push(aggregatorResult);
-            if (saveResults) {
-              aggregatorResult.print();
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
+    return results;
   }
 
   private async setupAggregator(podContext: PodContext) {
@@ -306,6 +343,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
+  Logger.setLevel(workerData.logLevel);
   runQueriesInWorker(workerData.podContext, workerData.cache)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });

@@ -9,6 +9,7 @@ import {ActivityDao} from "./utils/activity.dao";
 import fs from "node:fs";
 import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
+import {IndexedStore} from "../utils/indexed-store";
 
 async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy): Promise<ExperimentResult> {
   const auth = new Auth(podContext, {enableCache: (cache !== "none")});
@@ -20,19 +21,31 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
 
   const activityDao = new ActivityDao();
 
+  if (cache === "indexed") {
+    const store = new IndexedStore();
+    await store.add([activityUrl], auth.fetch.bind(auth));
+    await store.add(["https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
+
+    const startTime = process.hrtime();
+
+    const resultIterator = await activityDao.getById(activityIri, {
+      auth,
+      sources: [store.store] as any
+    });
+
+    return await ExperimentResult.fromIterator(
+      podContext.name + "_" + activityLocation + "_" + cache,
+      startTime,
+      resultIterator
+    );
+  }
+
+  const startTime = process.hrtime();
+
   const runQuery = async () => {
     return await activityDao.getById(activityIri, { auth });
   };
 
-  if (cache === "indexed") {
-    const it = await runQuery();
-    if (typeof it === 'object' && 'destroy' in it && typeof it.destroy === 'function') {
-      it.destroy();
-    }
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-
-  const startTime = process.hrtime();
   const resultIterator = await runQuery();
 
   return await ExperimentResult.fromIterator(
@@ -133,33 +146,29 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
     return queryUserContext;
   }
 
-  async run(saveResults: boolean, iterations: number): Promise<void> {
+  async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
-          // Generate pod name matching the structure used in generate()
           const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
           const experimentId = `${iterationConfig.iterationName}-${optionValues}`;
           const activityLocation = "activity";
 
-          // Initialize podContext for this iteration using the correct pod name
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
           for (const cache of ["none", "tokens", "indexed"]) {
-            Logger.info(`Running experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running local experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {podContext: this.podContext, activityLocation, cache}
+                workerData: {logLevel, podContext: this.podContext, activityLocation, cache}
               });
 
               worker.on('message', (message) => {
                 if (message.success) {
                   const experimentResult = ExperimentResult.deserialize(message.result);
                   results.push(experimentResult);
-                  if (saveResults) {
-                    experimentResult.print();
-                  }
                   resolve(experimentResult);
                 } else {
                   reject(new Error(message.error));
@@ -181,9 +190,26 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
+        }
+      }
+    }
+    return results;
+  }
+
+  async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    const results: ExperimentResult[] = [];
+
+    for (let iteration = 0; iteration < iterations; iteration++) {
+      for (const iterationConfig of this.experimentConfig.iterations) {
+        for (const arg of iterationConfig.args) {
+          const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
+          const experimentId = `${iterationConfig.iterationName}-${optionValues}`;
+          const activityLocation = "activity";
+
+          this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
           for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running experiment for pod ${this.podContext.name}, aggregator, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocation);
 
             const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
@@ -192,7 +218,6 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
             const startTime = process.hrtime();
 
-            // Query the activity using aggregator
             const activityUrl = `${this.podContext.baseUrl}/activities/${activityLocation}`;
             const activityIri = `${activityUrl}#activity`;
             const activityDao = new ActivityDao();
@@ -206,12 +231,10 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               auth
             });
 
-            // Convert activities result to JSON format for result builder
             const aggregatorResultJson = {
               results: {
                 bindings: Array.isArray(activities)
                   ? activities.map((activity: any) => {
-                      // Convert Activity object to JSON bindings format
                       const binding: any = {};
                       for (const [key, value] of Object.entries(activity)) {
                         if (value !== null && value !== undefined) {
@@ -233,19 +256,18 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               aggregatorResultJson
             );
             results.push(aggregatorResult);
-            if (saveResults) {
-              aggregatorResult.print();
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
+    return results;
   }
 }
 
 if (!isMainThread && parentPort) {
+  Logger.setLevel(workerData.logLevel);
   runQueriesInWorker(workerData.podContext, workerData.activityLocation, workerData.cache)
     .then((result: ExperimentResult) => {
       parentPort!.postMessage({ success: true, result: result.serialize() });

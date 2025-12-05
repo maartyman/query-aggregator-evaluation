@@ -1,6 +1,8 @@
 import {ExperimentSetup} from "./data-generator";
+import {ExperimentResult} from "./utils/result-builder";
 
 export interface Experiment {
   generate(): ExperimentSetup;
-  run(saveResults: boolean, iterations: number): Promise<void>;
+  runLocal(iterations: number): Promise<ExperimentResult[]>;
+  runAggregator(iterations: number): Promise<ExperimentResult[]>;
 }

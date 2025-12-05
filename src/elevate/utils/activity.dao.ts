@@ -84,6 +84,7 @@ export class ActivityDao {
   public async getById(
     id: number | string,
     options?: {
+      sources?: any[];
       auth?: Auth;
       aggregator?: {
         enabled: boolean;
@@ -93,7 +94,8 @@ export class ActivityDao {
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     const activityIri = typeof id === 'string' ? id : String(id);
-    return await this.activityMapping.query([activityIri], {
+    const sources = options?.sources || [activityIri];
+    return await this.activityMapping.query(sources as [string, ...string[]], {
         boundKeys: [
           {
             key: "activity",
