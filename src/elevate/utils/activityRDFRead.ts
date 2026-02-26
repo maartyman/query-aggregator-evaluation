@@ -262,7 +262,7 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       }
 
       // Get results from aggregator
-      const aggregatorResults = await this.queryViaAggregator(options.auth, query, [...sources, "https://solidlabresearch.github.io/activity-ontology/"], serviceKey);
+      const aggregatorResults = await this.queryViaAggregator(options.auth, query, sources, serviceKey);
 
       // Return count directly if count query
       if (options.type === "count") {
@@ -369,14 +369,12 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
     // Use Comunica query engine (original path)
     let bindingsStream = await this.queryEngine.queryBindings(query, {
-      sources: [...sources, "https://solidlabresearch.github.io/activity-ontology/"],
+      sources: sources,
       fetch: options.auth ? options.auth.fetch.bind(options.auth) : undefined
     });
 
     if (options.type === "count") {
-      return bindingsStream.map((bindings: Bindings) => {
-        return parseInt(bindings.get("count")!.value);
-      });
+      return parseInt((await bindingsStream.toArray())[0].get("count")!.value);
     }
 
     return bindingsStream
@@ -838,7 +836,7 @@ SELECT ?index WHERE {
       const aggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
-        ["https://solidlabresearch.github.io/activity-ontology/", ...sources],
+        sources,
         serviceKey
       );
 
@@ -851,7 +849,7 @@ SELECT ?index WHERE {
     } else {
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
-        sources: ["https://solidlabresearch.github.io/activity-ontology/", ...sources],
+        sources: sources,
         fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
       });
 

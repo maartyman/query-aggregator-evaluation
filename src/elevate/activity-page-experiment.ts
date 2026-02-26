@@ -23,8 +23,7 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
 
   if (cache === "indexed") {
     const store = new IndexedStore();
-    await store.add([activityUrl], auth.fetch.bind(auth));
-    await store.add(["https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
+    await store.add([activityUrl, "https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
 
     const startTime = process.hrtime();
 

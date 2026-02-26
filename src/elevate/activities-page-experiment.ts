@@ -97,27 +97,25 @@ async function runQueriesInWorker(
   const activitySources = activityLocations.map(location =>
     `${podContext.baseUrl}/activities/${location}`
   );
+  activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
   const activityDao = new ActivityDao();
 
   if (cache === "indexed") {
     const store = new IndexedStore();
     await store.add(activitySources, auth.fetch.bind(auth));
-    await store.add(["https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
 
     const startTime = process.hrtime();
 
-    await (<AsyncIterator<any>>await activityDao.count({
-      sources: [store.store] as any,
-      auth
-    })).toArray();
+    await activityDao.count({
+      sources: [store.store] as any
+    });
 
     const resultIterator = await activityDao.find({
       sources: [store.store] as any,
       keys: columnConfig.keys,
       filterKeys: columnConfig.filterKeys,
-      ...(columnConfig.sort && { sort: columnConfig.sort }),
-      auth
+      ...(columnConfig.sort && { sort: columnConfig.sort })
     });
 
     return await ExperimentResult.fromIterator(
@@ -129,22 +127,18 @@ async function runQueriesInWorker(
 
   const startTime = process.hrtime();
 
-  const runQuery = async () => {
-    await (<AsyncIterator<any>>await activityDao.count({
-      sources: activitySources,
-      auth
-    })).toArray();
+  await activityDao.count({
+    sources: activitySources,
+    auth
+  });
 
-    return await activityDao.find({
-      sources: activitySources,
-      keys: columnConfig.keys,
-      filterKeys: columnConfig.filterKeys,
-      ...(columnConfig.sort && { sort: columnConfig.sort }),
-      auth
-    });
-  };
-
-  const resultIterator = await runQuery();
+  const resultIterator = await activityDao.find({
+    sources: activitySources,
+    keys: columnConfig.keys,
+    filterKeys: columnConfig.filterKeys,
+    ...(columnConfig.sort && { sort: columnConfig.sort }),
+    auth
+  });
 
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + selectedColumns + "_" + cache,
@@ -187,6 +181,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     const activitySources = activityLocations.map(location =>
       `${podContext.baseUrl}/activities/${location}`
     );
+    activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
     const activityDao = new ActivityDao();
 
@@ -367,6 +362,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             const activitySources = activityLocations.map(location =>
               `${this.podContext!.baseUrl}/activities/${location}`
             );
+            activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
             const columnConfig = SelectedColumnsMap[selectedColumns];
             if (!columnConfig) {

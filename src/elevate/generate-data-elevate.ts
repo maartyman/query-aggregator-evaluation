@@ -48,6 +48,17 @@ export const ComplexityMap: Record<string, ActivityGeneratorOptions> = {
     with_source_stats: false,
     bare_minimum: false
   },
+  "normal": {
+    activity_type: ElevateSport.Run,
+    with_cadence_meter: true,
+    with_dynamics: false,
+    with_flags: false,
+    with_heart_rate_meter: true,
+    with_laps: false,
+    with_power_meter: false,
+    with_source_stats: true,
+    bare_minimum: false
+  },
   "complex": {
     activity_type: ElevateSport.Ride,
     with_cadence_meter: true,

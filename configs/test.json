@@ -8,15 +8,7 @@
         {
           "iterationName": "number-of-joined-watchparties",
           "args": [
-            [1],
-            [5],
-            [10],
-            [20],
-            [30],
-            [40],
-            [60],
-            [80],
-            [100]
+            [1]
           ]
         }
       ]
@@ -27,23 +19,13 @@
         {
           "iterationName": "number-of-members",
           "args": [
-            [10,10],
-            [20,10],
-            [30,10],
-            [40,10],
-            [50,10],
-            [60,10]
+            [10,10]
           ]
         },
         {
           "iterationName": "number-of-messages",
           "args": [
-            [10,10],
-            [10,20],
-            [10,30],
-            [10,40],
-            [10,50],
-            [10,60]
+            [10,10]
           ]
         }
       ]
@@ -54,10 +36,7 @@
         {
           "iterationName": "activity-complexity",
           "args": [
-            ["minimum"],
-            ["simple"],
-            ["normal"],
-            ["complex"]
+            ["minimum"]
           ]
         }
       ]
@@ -68,12 +47,7 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "minimal", 10],
-            ["complex", "minimal", 20],
-            ["complex", "minimal", 30],
-            ["complex", "minimal", 40],
-            ["complex", "minimal", 50],
-            ["complex", "minimal", 60]
+            ["complex", "minimal", 10]
           ]
         }
       ]
@@ -84,12 +58,7 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "normal", 10],
-            ["complex", "normal", 20],
-            ["complex", "normal", 30],
-            ["complex", "normal", 40],
-            ["complex", "normal", 50],
-            ["complex", "normal", 60]
+            ["complex", "normal", 10]
           ]
         }
       ]
@@ -100,12 +69,7 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "complex", 10],
-            ["complex", "complex", 20],
-            ["complex", "complex", 30],
-            ["complex", "complex", 40],
-            ["complex", "complex", 50],
-            ["complex", "complex", 60]
+            ["complex", "complex", 10]
           ]
         }
       ]
@@ -116,12 +80,7 @@
         {
           "iterationName": "activities-count",
           "args": [
-            ["complex", "fitness-trend", 10],
-            ["complex", "fitness-trend", 30],
-            ["complex", "fitness-trend", 50],
-            ["complex", "fitness-trend", 70],
-            ["complex", "fitness-trend", 90],
-            ["complex", "fitness-trend", 110]
+            ["complex", "fitness-trend", 10]
           ]
         }
       ]
@@ -132,12 +91,7 @@
         {
           "iterationName": "activities-count",
           "args": [
-            ["complex", "year-progress", 10],
-            ["complex", "year-progress", 30],
-            ["complex", "year-progress", 50],
-            ["complex", "year-progress", 70],
-            ["complex", "year-progress", 90],
-            ["complex", "year-progress", 110]
+            ["complex", "year-progress", 10]
           ]
         }
       ]

@@ -10,53 +10,6 @@ export class ActivityDao {
     this.activityMapping = new ActivityRDFRead();
   }
 
-  private async getDefaultSources(sources?: string[]): Promise<[string, ...string[]]> {
-    // If sources provided, use them
-    if (sources && sources.length > 0) {
-      return sources as [string, ...string[]];
-    }
-    // Default: return the activity ontology source
-    return ["https://solidlabresearch.github.io/activity-ontology/"];
-  }
-
-  public async findByDatedSession(startTime: string, endTime: string, options?: { auth?: Auth; aggregator?: { enabled: boolean; podContext: any; enableCache: boolean } }): Promise<AsyncIterator<any> | Activity[] | number> {
-    return this.activityMapping.query(await this.getDefaultSources(), {
-      filterKeys: [
-        { key: "activity_startTime", relationKeyToValue: ">", value: new Date(startTime) },
-        { key: "activity_endTime", relationKeyToValue: ">", value: new Date(endTime) }
-      ],
-      auth: options?.auth,
-      aggregator: options?.aggregator
-    });
-  }
-
-  public async findSorted(descending: boolean, options?: { auth?: Auth; aggregator?: { enabled: boolean; podContext: any; enableCache: boolean } }): Promise<AsyncIterator<any> | Activity[] | number> {
-    return this.activityMapping.query(await this.getDefaultSources(), {
-      sort: { key: "activity_startTime", ascending: !descending },
-      auth: options?.auth,
-      aggregator: options?.aggregator
-    });
-  }
-
-  public async hasActivitiesWithSettingsLacks(options?: { auth?: Auth; aggregator?: { enabled: boolean; podContext: any; enableCache: boolean } }): Promise<AsyncIterator<any> | Activity[] | number> {
-    return this.activityMapping.query(await this.getDefaultSources(), {
-      keys: ["activity_settingsLack"],
-      boundKeys: [{ key: "activity_settingsLack", value: true }],
-      type: "ask",
-      auth: options?.auth,
-      aggregator: options?.aggregator
-    });
-  }
-
-  public async findActivitiesWithSettingsLacks(keys?: string[], options?: { auth?: Auth; aggregator?: { enabled: boolean; podContext: any; enableCache: boolean } }): Promise<AsyncIterator<any> | Activity[] | number> {
-    return this.activityMapping.query(await this.getDefaultSources(), {
-      keys,
-      boundKeys: [{ key: "activity_settingsLack", value: true }],
-      auth: options?.auth,
-      aggregator: options?.aggregator
-    });
-  }
-
   public async find(options?: {
     sources?: string[];
     keys?: string[];
@@ -72,13 +25,14 @@ export class ActivityDao {
     aggregator?: { enabled: boolean; podContext: any; enableCache: boolean };
   }): Promise<AsyncIterator<any> | Activity[] | number> {
     const sources = options?.sources
-      ? (options.sources as [string, ...string[]])
-      : await this.getDefaultSources();
+    if (sources === undefined || sources.length === 0) {
+      throw new Error("No sources provided for activity query.");
+    }
 
     const queryOptions = { ...options };
     delete queryOptions.sources;
 
-    return this.activityMapping.query(sources, queryOptions);
+    return this.activityMapping.query(sources as [string, ...string[]], queryOptions);
   }
 
   public async getById(
@@ -94,7 +48,7 @@ export class ActivityDao {
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     const activityIri = typeof id === 'string' ? id : String(id);
-    const sources = options?.sources || [activityIri];
+    const sources = options?.sources || [activityIri, "https://solidlabresearch.github.io/activity-ontology/"];
     return await this.activityMapping.query(sources as [string, ...string[]], {
         boundKeys: [
           {
@@ -119,10 +73,11 @@ export class ActivityDao {
     filterKeys?: { key: string; relationKeyToValue: string; value: string | number | boolean | Date }[];
     auth?: Auth;
     aggregator?: { enabled: boolean; podContext: any; enableCache: boolean };
-  }): Promise<AsyncIterator<any> | Activity[] | number> {
+  }): Promise<number> {
     const sources = options?.sources
-      ? (options.sources as [string, ...string[]])
-      : await this.getDefaultSources();
+    if (sources === undefined || sources.length === 0) {
+      throw new Error("No sources provided for activity query.");
+    }
 
     const queryOptions = { ...options };
     delete queryOptions.sources;
@@ -147,13 +102,13 @@ export class ActivityDao {
         }
       });
     }
-    return this.activityMapping.query(sources, {
+    return this.activityMapping.query(sources as [string, ...string[]], {
       keys: keys,
       boundKeys: options.boundKeys,
       filterKeys: options.filterKeys,
       type: "count",
       auth: options.auth,
       aggregator: options.aggregator
-    });
+    }) as Promise<number>;
   }
 }

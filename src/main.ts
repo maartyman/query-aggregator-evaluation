@@ -125,13 +125,13 @@ async function runExperiment(
   getAggregatorIdStore().clear();
 
   //await experiment.runLocal(2);
-  //let resultsLocal = await experiment.runLocal(1);
-  await experiment.runAggregator(2);
-  let resultsAggregator = await experiment.runAggregator(1);
+  let resultsLocal = await experiment.runLocal(1);
+  //await experiment.runAggregator(2);
+  //let resultsAggregator = await experiment.runAggregator(1);
 
   stopServers();
 
-  return [...resultsAggregator];
+  return [...resultsLocal];
   //return [...resultsLocal, ...resultsAggregator];
 }
 
@@ -263,7 +263,7 @@ async function main() {
   console.log(`\n========================================\n`);
 }
 
-/*
+
 main().then(() => {
   console.log("Execution completed");
   process.exit(0);
@@ -271,28 +271,26 @@ main().then(() => {
   console.error("Execution failed: ", error);
   process.exit(1);
 });
-*/
 
+
+/*
 runExperiment("test-experiment-1", {
   "type": "watchparty-overview-page",
-  "podsPerServer": 1000,
+  "podsPerServer": 30,
   "iterations": [
     {
       "iterationName": "number-of-joined-watchparties",
       "args": [
         [10],
         [20],
-        [30],
-        [40],
-        [50],
-        [60]
+        [100],
       ]
     }
   ],
-}, false, false, {
-  aggregator: "warn",
-  uma: "warn",
-  css: "warn"
+}, false, true, {
+  aggregator: "error",
+  uma: "error",
+  css: "error"
 }).then((result) => {
   for (const res of result) {
     res.print();
@@ -337,6 +335,7 @@ runExperiment("test-experiment-3", {
       "args": [
         ["minimal"],
         ["simple"],
+        ["normal"],
         ["complex"]
       ]
     }
@@ -350,30 +349,28 @@ runExperiment("test-experiment-3", {
   console.error("Experiment failed: ", error);
 });
 
+/*
 runExperiment("test-experiment-4", {
   "type": "elevate-activities-page",
   "podsPerServer": 30,
   "iterations": [
     {
-      "iterationName": "activities-count",
-      "args": [
-        ["minimal", "minimal", 10],
-        ["minimal", "minimal", 60],
-      ]
-    },
-
-    {
       "iterationName": "activities-complexity",
       "args": [
         ["complex", "minimal", 10],
+        ["complex", "minimal", 300],
         ["complex", "normal", 10],
+        ["complex", "normal", 200],
         ["complex", "complex", 10],
+        ["complex", "complex", 60]
       ]
     }
 
   ]
 }, false, false, {
-  experiment: "error"
+  experiment: "info",
+  aggregator: "debug",
+  uma: "warn",
 }).then((result) => {
   for (const res of result) {
     res.print();
@@ -391,9 +388,7 @@ runExperiment("test-experiment-5", {
     {
       "iterationName": "activities-count",
       "args": [
-        ["complex", "fitness-trend", 1],
-        ["complex", "fitness-trend", 5],
-        ["complex", "fitness-trend", 10],
+        ["complex", "fitness-trend", 2],
       ]
     }
   ]
