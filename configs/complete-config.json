@@ -54,7 +54,7 @@
         {
           "iterationName": "activity-complexity",
           "args": [
-            ["minimum"],
+            ["minimal"],
             ["simple"],
             ["normal"],
             ["complex"]
