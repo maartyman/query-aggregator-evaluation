@@ -55,6 +55,45 @@ export interface Config {
   experiments: Record<string, ExperimentConfig>;
 }
 
+const WARMUP_RUNS = 1;
+const RECORDED_RUNS = 30;
+
+function getIterationMetadata(
+  experimentId: string,
+  experimentConfig: ExperimentConfig
+): { iterationName: string; iterationArgs: string } | null {
+  const candidates: Array<{ prefix: string; iterationName: string; iterationArgs: string }> = [];
+
+  for (const iterationConfig of experimentConfig.iterations) {
+    for (const arg of iterationConfig.args) {
+      const iterationArgs = arg.map(value => String(value)).join("_");
+      const normalizedIterationArgs = iterationArgs.toLowerCase();
+      const argEncodings = new Set([iterationArgs, normalizedIterationArgs]);
+
+      for (const encodedArgs of argEncodings) {
+        candidates.push({
+          prefix: `${iterationConfig.iterationName}-${encodedArgs}_`,
+          iterationName: iterationConfig.iterationName,
+          iterationArgs
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => b.prefix.length - a.prefix.length);
+
+  for (const candidate of candidates) {
+    if (experimentId.startsWith(candidate.prefix)) {
+      return {
+        iterationName: candidate.iterationName,
+        iterationArgs: candidate.iterationArgs
+      };
+    }
+  }
+
+  return null;
+}
+
 async function runExperiment(
   experimentName: string,
   experimentConfig: ExperimentConfig,
@@ -124,15 +163,21 @@ async function runExperiment(
 
   getAggregatorIdStore().clear();
 
-  //await experiment.runLocal(2);
-  let resultsLocal = await experiment.runLocal(1);
-  //await experiment.runAggregator(2);
-  //let resultsAggregator = await experiment.runAggregator(1);
+  try {
+    console.log(`Running ${WARMUP_RUNS} warmup run(s) for local conditions...`);
+    await experiment.runLocal(WARMUP_RUNS);
+    console.log(`Running ${WARMUP_RUNS} warmup run(s) for aggregator conditions...`);
+    await experiment.runAggregator(WARMUP_RUNS);
 
-  stopServers();
+    console.log(`Running ${RECORDED_RUNS} recorded run(s) for local conditions...`);
+    const resultsLocal = await experiment.runLocal(RECORDED_RUNS);
+    console.log(`Running ${RECORDED_RUNS} recorded run(s) for aggregator conditions...`);
+    const resultsAggregator = await experiment.runAggregator(RECORDED_RUNS);
 
-  return [...resultsLocal];
-  //return [...resultsLocal, ...resultsAggregator];
+    return [...resultsLocal, ...resultsAggregator];
+  } finally {
+    stopServers();
+  }
 }
 
 async function main() {
@@ -182,6 +227,8 @@ async function main() {
           derivedClaims
         );
 
+        const resultRunCounts = new Map<string, number>();
+
         for (const result of results) {
           try {
             if (!result.parameters) {
@@ -193,16 +240,15 @@ async function main() {
             result.parameters.derivedClaims = derivedClaims;
             result.parameters.podsPerServer = podsPerServer;
             result.parameters.useExistingData = config.useExistingData ?? false;
+            result.parameters.warmupRuns = WARMUP_RUNS;
+            result.parameters.recordedRuns = RECORDED_RUNS;
 
             const idParts = result.experimentId.split('_');
+            const iterationMetadata = getIterationMetadata(result.experimentId, experimentConfig);
 
-            if (idParts.length > 0) {
-              const iterationPart = idParts[0];
-              const iterationMatch = iterationPart.match(/^(.+?)-(.+)$/);
-              if (iterationMatch) {
-                result.parameters.iterationName = iterationMatch[1];
-                result.parameters.iterationArgs = iterationMatch[2];
-              }
+            if (iterationMetadata) {
+              result.parameters.iterationName = iterationMetadata.iterationName;
+              result.parameters.iterationArgs = iterationMetadata.iterationArgs;
             }
 
             if (idParts.includes('aggregator')) {
@@ -218,7 +264,12 @@ async function main() {
               }
             }
 
-            const resultFileName = `${result.experimentId}${suffix}.json`;
+            const runIndex = (resultRunCounts.get(result.experimentId) ?? 0) + 1;
+            resultRunCounts.set(result.experimentId, runIndex);
+            result.parameters.measurementRun = runIndex;
+
+            const runLabel = String(runIndex).padStart(String(RECORDED_RUNS).length, '0');
+            const resultFileName = `${result.experimentId}_run-${runLabel}${suffix}.json`;
             const resultPath = path.join(resultsDir, resultFileName);
             result.save(resultPath);
             console.log(`Saved result to: ${resultPath}`);
