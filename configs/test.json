@@ -36,7 +36,7 @@
         {
           "iterationName": "activity-complexity",
           "args": [
-            ["minimum"]
+            ["minimal"]
           ]
         }
       ]
