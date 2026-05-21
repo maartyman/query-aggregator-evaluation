@@ -104,6 +104,7 @@ PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 `;
 
     if (options.type === "count") {
@@ -186,13 +187,6 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       }
     }
 
-    // Add bound keys to the query tree
-    for (const boundKey of options.boundKeys ?? []) {
-      const key = boundKey.key;
-      const value = boundKey.value;
-      query += `BIND(${this.encodeTerm(value)} AS ?${key})\n`;
-    }
-
     // Construct query from tree
     const constructQuery = (node: any): string => {
       let queryPart = node.graphPattern;
@@ -212,6 +206,11 @@ PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
       return queryPart;
     };
     query += constructQuery(queryTree);
+
+    // Add bound keys after graph construction so computed bindings can be filtered as well.
+    for (const boundKey of options.boundKeys ?? []) {
+      query += `FILTER(?${boundKey.key} = ${this.encodeTerm(boundKey.value)})\n`;
+    }
 
     // Add filter keys to the query
     for (const filterKey of options.filterKeys ?? []) {

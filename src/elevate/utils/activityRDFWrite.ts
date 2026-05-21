@@ -1,11 +1,11 @@
 import {
   Activity,
-  ElevateSport,
   Peak,
   Scores,
   SlopeProfile,
   ZoneModel
 } from "./elevate-types";
+import { activityTypeIriForElevateSport, OAACTIVITY_NS } from "./activity-type-ontology-map";
 
 export class ActivityRDFWrite {
   write(location: string, activity: Activity): string {
@@ -48,38 +48,25 @@ export class ActivityRDFWrite {
     ttl += `PREFIX foaf: <http://xmlns.com/foaf/0.1/>\n`;
     ttl += `PREFIX prov: <http://www.w3.org/ns/prov#>\n`;
     ttl += `PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n`;
+    ttl += `PREFIX skos: <http://www.w3.org/2004/02/skos/core#>\n`;
+    ttl += `PREFIX oaactivity: <${OAACTIVITY_NS}>\n`;
     ttl += `PREFIX activo: <https://solidlabresearch.github.io/activity-ontology#>\n\n`;
 
     addLink(activityIri, "a", "activo:Activity");
-    switch (activity.type) {
-      case ElevateSport.Ride:
-        addLink(activityIri, "a", "activo:Ride");
-        break;
-      case ElevateSport.Run:
-        addLink(activityIri, "a", "activo:Run");
-        break;
-      case ElevateSport.Swim:
-        addLink(activityIri, "a", "activo:Swim");
-        break;
+    const activityType = (activity as any).type;
+    if (typeof activityType === "string" && activityType) {
+      addLink(activityIri, "activo:activityType", activityTypeIriForElevateSport(activityType));
     }
 
     // ----------------- basic activity fields -----------------
     addLit(activityIri, "activo:name", (activity as any).name);
-    addLit(activityIri, "activo:startTime", new Date((activity as any).startTime));
-    addLit(activityIri, "activo:endTime", new Date((activity as any).endTime));
-    addLit(activityIri, "activo:hasPowerData", (activity as any).hasPowerMeter);
+    addLit(activityIri, "activo:startTime", (activity as any).startTime);
+    addLit(activityIri, "activo:endTime", (activity as any).endTime);
     addLit(activityIri, "activo:isTrainer", (activity as any).trainer);
     addLit(activityIri, "activo:isCommute", (activity as any).commute);
     addLit(activityIri, "activo:isManual", (activity as any).manual);
     addLit(activityIri, "activo:isSwimPool", (activity as any).isSwimPool);
     addLit(activityIri, "activo:hash", (activity as any).hash);
-    addLit(
-      activityIri,
-      "activo:isWithoutAthletePerformance",
-      (activity as any).settingsLack === undefined || (activity as any).settingsLack === null
-        ? false
-        : (activity as any).settingsLack
-    );
     addLit(activityIri, "prov:generatedAtTime", (activity as any).creationTime);
     addLit(activityIri, "activo:notes", (activity as any).notes);
     addLit(activityIri, "activo:isTypeAutoDetected", (activity as any).autoDetectedType);
@@ -90,35 +77,37 @@ export class ActivityRDFWrite {
       addLit(activityIri, "activo:lonCenter", latLng[1]); // ontology
     }
 
-    // ----------------- athlete snapshot (ONLY) -----------------
+    // ----------------- athlete + settings used for computation -----------------
     const snap = (activity as any).athleteSnapshot; // { gender, age, athleteSettings }
     if (snap) {
-      const snapshotIri = mint("performanceSnapshot");
-      addLink(activityIri, "activo:hasPerformanceSnapshot", snapshotIri);
-      addLink(snapshotIri, "a", "activo:PerformanceSnapshot");
-      const athleteIri = mint("athlete");
+      const athleteIri = (activity as any).athleteId || mint("athlete");
+      const settingsHistoryIri = mint("athleteSettingsHistory");
+      const datedSettingsIri = mint("datedAthleteSettings");
       addLink(activityIri, "activo:hasAthlete", athleteIri);
-      addLink(athleteIri, "a", "foaf:Person");
-      addLink(snapshotIri, "activo:hasAthlete", athleteIri);
+      addLink(athleteIri, "a", "activo:Athlete");
+      addLink(athleteIri, "activo:hasAthleteSettingsHistory", settingsHistoryIri);
+      addLink(settingsHistoryIri, "a", "activo:AthleteSettingsHistory");
+      addLink(settingsHistoryIri, "activo:hasDatedAthleteSettings", datedSettingsIri);
+      addLink(datedSettingsIri, "a", "activo:DatedAthleteSettings");
 
       if ("gender" in snap) addLit(athleteIri, "foaf:gender", snap.gender);
       if ("age" in snap) addLit(athleteIri, "foaf:age", snap.age);
 
       const set = snap.athleteSettings as any;
       if (set) {
-        addLit(snapshotIri, "activo:maxHeartRate", set.maxHr);
-        addLit(snapshotIri, "activo:restHeartRate", set.restHr);
-        addLit(snapshotIri, "activo:weight", set.weight);
-        if (set.cyclingFtp != null) addLit(snapshotIri, "activo:cyclingFunctionalThresholdPower", set.cyclingFtp);
-        if (set.runningFtp != null) addLit(snapshotIri, "activo:runningFunctionalThresholdPower", set.runningFtp);
-        if (set.swimFtp != null) addLit(snapshotIri, "activo:swimmingFunctionalThresholdPower", set.swimFtp);
+        addLit(datedSettingsIri, "activo:maxHeartRate", set.maxHr);
+        addLit(datedSettingsIri, "activo:restHeartRate", set.restHr);
+        addLit(datedSettingsIri, "activo:weight", set.weight);
+        if (set.cyclingFtp != null) addLit(datedSettingsIri, "activo:cyclingFunctionalThresholdPower", set.cyclingFtp);
+        if (set.runningFtp != null) addLit(datedSettingsIri, "activo:runningFunctionalThresholdPace", set.runningFtp);
+        if (set.swimFtp != null) addLit(datedSettingsIri, "activo:swimmingFunctionalThresholdSpeed", set.swimFtp);
 
         const lthr = set.lthr as any;
         if (lthr) {
           // Write what exists; names match your earlier usage
-          if (lthr.default != null) addLit(snapshotIri, "activo:defaultLactateThreshold", lthr.default);
-          if (lthr.cycling != null) addLit(snapshotIri, "activo:cyclingLactateThreshold", lthr.cycling);
-          if (lthr.running != null) addLit(snapshotIri, "activo:runningLactateThreshold", lthr.running);
+          if (lthr.default != null) addLit(datedSettingsIri, "activo:defaultLactateThreshold", lthr.default);
+          if (lthr.cycling != null) addLit(datedSettingsIri, "activo:cyclingLactateThreshold", lthr.cycling);
+          if (lthr.running != null) addLit(datedSettingsIri, "activo:runningLactateThreshold", lthr.running);
         }
       }
     }
@@ -302,9 +291,9 @@ export class ActivityRDFWrite {
       return iri;
     };
 
-    const writeScores = (statsIri: string, s?: Scores) => {
+    const writeScores = (statsIri: string, s?: Scores, context?: string) => {
       if (!s) return;
-      const i = mint("scores");
+      const i = mint(context ? `${context}-scores` : "scores");
       addLink(statsIri, "activo:hasScores", i);
       addLink(i, "a", "activo:Scores");
       if ("efficiency" in s) addLit(i, "activo:efficiency", s.efficiency);
@@ -333,6 +322,27 @@ export class ActivityRDFWrite {
             addLit(i, "activo:anaerobicTrainingEffect", s.stress.trainingEffect.anaerobic);
         }
       }
+    };
+
+    const writeStatsProvenance = (statsIri: string, slotName: "srcStats" | "stats") => {
+      if (slotName === "srcStats") {
+        const recordingIri = mint("sourceStats-recordingActivity");
+        const deviceIri = mint("sourceStats-device");
+        addLink(statsIri, "prov:wasGeneratedBy", recordingIri);
+        addLink(recordingIri, "a", "activo:RecordingActivity");
+        addLink(recordingIri, "prov:wasAssociatedWith", deviceIri);
+        addLink(deviceIri, "a", "activo:Device");
+        addLit(deviceIri, "foaf:name", (activity as any).device);
+        return;
+      }
+
+      const computationIri = mint("stats-computationActivity");
+      const applicationIri = mint("stats-application");
+      addLink(statsIri, "prov:wasGeneratedBy", computationIri);
+      addLink(computationIri, "a", "activo:StatsComputationActivity");
+      addLink(computationIri, "prov:wasAssociatedWith", applicationIri);
+      addLink(applicationIri, "a", "activo:Application");
+      addLit(applicationIri, "foaf:name", "Elevate");
     };
 
     const writeDynamics = (statsRootIri: string, dyn?: any, slot: "src" | "norm" = "norm") => {
@@ -387,13 +397,9 @@ export class ActivityRDFWrite {
       if (!st) return;
       const iri = mint(slotName);
 
-      if (slotName === "srcStats") {
-        addLink(activityIri, "activo:hasSourceStats", iri);
-      }
-      if (slotName === "stats") {
-        addLink(activityIri, "activo:hasStats", iri);
-      }
+      addLink(activityIri, "activo:hasStats", iri);
       addLink(iri, "a", "activo:Stats");
+      writeStatsProvenance(iri, slotName);
 
       if ("distance" in st) addLit(iri, "activo:distance", st.distance);
       if ("elapsedTime" in st) addLit(iri, "activo:elapsedTime", st.elapsedTime);
@@ -403,7 +409,7 @@ export class ActivityRDFWrite {
       if ("calories" in st) addLit(iri, "activo:calories", st.calories);
       if ("caloriesPerHour" in st) addLit(iri, "activo:caloriesPerHour", st.caloriesPerHour);
 
-      if ("scores" in st) writeScores(iri, st.scores);
+      if ("scores" in st) writeScores(iri, st.scores, slotName);
 
       writeMetricSet(iri, "SpeedStats", st.speed, {peaks: st?.speed?.peaks, zones: st?.speed?.zones}, slotName);
       writeMetricSet(iri, "PaceStats", st.pace, {peaks: st?.pace?.peaks, zones: st?.pace?.zones}, slotName);
