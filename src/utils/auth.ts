@@ -4,6 +4,12 @@ import {PodContext} from "../data-generator";
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import {Logger} from './logger';
+import {
+  classifyHttpRequest,
+  recordHttpRequest,
+  trackResponseTriples,
+  type HttpRequestKind
+} from './http-metrics';
 
 let saveCacheLock: Promise<void> = Promise.resolve();
 
@@ -325,11 +331,29 @@ export class Auth {
     init?: RequestInit,
   ): Promise<Response> {
     await this.acquireRequestSlot();
+    const requestKind = classifyHttpRequest(input);
+    const method = init?.method || 'GET';
+    recordHttpRequest(requestKind);
     try {
-      return await fetch(input, init);
+      const response = await fetch(input, init);
+      trackResponseTriples(response, requestKind, method, typeof input === 'string' ? input : input.toString());
+      return response;
     } finally {
       this.releaseRequestSlot();
     }
+  }
+
+  private async countedFetch(
+    input: string | URL | Request,
+    init?: RequestInit,
+    requestKind?: HttpRequestKind
+  ): Promise<Response> {
+    const kind = requestKind ?? classifyHttpRequest(input);
+    const method = init?.method || 'GET';
+    recordHttpRequest(kind);
+    const response = await fetch(input, init);
+    trackResponseTriples(response, kind, method, typeof input === 'string' ? input : input.toString());
+    return response;
   }
 
   async fetch(
@@ -412,12 +436,12 @@ export class Auth {
 
   async sse(input: string, abortController: AbortController): Promise<EventEmitter> {
     Logger.debug('SSE connection requested', input);
-    const response = await fetch(input, {
+    const response = await this.countedFetch(input, {
       method: 'GET',
       headers: {
         'Accept': 'text/event-stream',
       },
-    });
+    }, 'resource');
     if (response.status !== 401) {
       throw new Error(`Did not receive 401 when trying to connect to SSE. status: ${response.status}, body: ${await response.text()}`);
     }
@@ -445,7 +469,7 @@ export class Auth {
       throw new Error('Missing UMA service endpoint for SSE');
     }
 
-    const serviceTokenResponse = await fetch(serviceEndpoint, {
+    const serviceTokenResponse = await this.countedFetch(serviceEndpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -454,13 +478,13 @@ export class Auth {
       body: JSON.stringify({
         resource_url: input,
       }),
-    });
+    }, 'authorizationToken');
     if (!serviceTokenResponse.ok) {
       throw new Error('cannot retrieve service token: ' + await serviceTokenResponse.text());
     }
     const serviceTokenJson = await serviceTokenResponse.json();
 
-    const authenticatedResponse = await fetch(input, {
+    const authenticatedResponse = await this.countedFetch(input, {
       method: 'GET',
       headers: {
         'Accept': 'text/event-stream',
@@ -468,7 +492,7 @@ export class Auth {
         'Authorization': `Bearer ${serviceTokenJson.service_token}`,
       },
       signal: abortController.signal,
-    });
+    }, 'resource');
 
     if (!authenticatedResponse.ok || !authenticatedResponse.body) {
       throw new Error(`cannot connect to SSE (status: ${authenticatedResponse.status}):` + await authenticatedResponse.text());
@@ -502,4 +526,3 @@ export class Auth {
     return emitter;
   }
 }
-

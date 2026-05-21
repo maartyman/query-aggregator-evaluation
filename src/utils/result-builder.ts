@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { getHttpMetricsSnapshot, resetHttpMetrics } from './http-metrics';
 
 export class ExperimentResult {
   public experimentId: string;
@@ -104,9 +105,10 @@ export class ExperimentResult {
 
         if (timestamps.length === 0) {
           reject(new Error(`No results received from iterator during experiment ${experimentId}.`));
+          return;
         }
 
-        resolve(new ExperimentResult(
+        getHttpMetricsSnapshot().then(metrics => resolve(new ExperimentResult(
           experimentId,
           totalDuration,
           this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
@@ -114,8 +116,12 @@ export class ExperimentResult {
           this.calculateDiefficiency(timestamps, [10,0]), // 10s
           timestamps,
           timestamps.length,
-          parameters
-        ));
+          {
+            ...metrics,
+            queryResultCount: timestamps.length,
+            ...parameters
+          }
+        ))).catch(reject);
       });
 
       resultIterator.on('error', (error: any) => {
@@ -128,12 +134,12 @@ export class ExperimentResult {
   /**
    * Create ExperimentResult from fetching a json result
    */
-  public static fromJson(
+  public static async fromJson(
     experimentId: string,
     startTime: [number, number],
     jsonResult: any,
     parameters?: Record<string, any>
-  ): ExperimentResult {
+  ): Promise<ExperimentResult> {
     const endTime = process.hrtime(startTime);
     const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
 
@@ -146,6 +152,8 @@ export class ExperimentResult {
       throw new Error(`No results received from JSON result during experiment: ${experimentId}`);
     }
 
+    const metrics = await getHttpMetricsSnapshot();
+
     return new ExperimentResult(
       experimentId,
       totalDuration,
@@ -154,8 +162,17 @@ export class ExperimentResult {
       this.calculateDiefficiency(timestamps, [10,0]), // 10s
       timestamps,
       timestamps.length,
-      parameters
+      {
+        ...metrics,
+        queryResultCount: timestamps.length,
+        ...parameters
+      }
     );
+  }
+
+  public static startMeasurement(): [number, number] {
+    resetHttpMetrics();
+    return process.hrtime();
   }
 
   private static calculateDiefficiency(timestamps: [number,number][], timeMs: [number,number]): number {

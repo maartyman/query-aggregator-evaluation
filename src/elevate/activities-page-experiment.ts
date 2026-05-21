@@ -105,7 +105,7 @@ async function runQueriesInWorker(
     const store = new IndexedStore();
     await store.add(activitySources, auth.fetch.bind(auth));
 
-    const startTime = process.hrtime();
+    const startTime = ExperimentResult.startMeasurement();
 
     await activityDao.count({
       sources: [store.store] as any
@@ -121,11 +121,12 @@ async function runQueriesInWorker(
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + selectedColumns + "_" + cache,
       startTime,
-      resultIterator
+      resultIterator,
+      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
-  const startTime = process.hrtime();
+  const startTime = ExperimentResult.startMeasurement();
 
   await activityDao.count({
     sources: activitySources,
@@ -357,7 +358,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             await auth.init();
             await auth.getAccessToken();
 
-            const startTime = process.hrtime();
+            const startTime = ExperimentResult.startMeasurement();
 
             const activitySources = activityLocations.map(location =>
               `${this.podContext!.baseUrl}/activities/${location}`
@@ -412,7 +413,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               }
             };
 
-            const aggregatorResult = ExperimentResult.fromJson(
+            const aggregatorResult = await ExperimentResult.fromJson(
               this.podContext.name + "_" + selectedColumns + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson

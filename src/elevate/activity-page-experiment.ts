@@ -25,7 +25,7 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
     const store = new IndexedStore();
     await store.add([activityUrl, "https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
 
-    const startTime = process.hrtime();
+    const startTime = ExperimentResult.startMeasurement();
 
     const resultIterator = await activityDao.getById(activityIri, {
       auth,
@@ -35,11 +35,12 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + activityLocation + "_" + cache,
       startTime,
-      resultIterator
+      resultIterator,
+      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
-  const startTime = process.hrtime();
+  const startTime = ExperimentResult.startMeasurement();
 
   const runQuery = async () => {
     return await activityDao.getById(activityIri, { auth });
@@ -215,7 +216,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             await auth.init();
             await auth.getAccessToken();
 
-            const startTime = process.hrtime();
+            const startTime = ExperimentResult.startMeasurement();
 
             const activityUrl = `${this.podContext.baseUrl}/activities/${activityLocation}`;
             const activityIri = `${activityUrl}#activity`;
@@ -249,7 +250,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               }
             };
 
-            const aggregatorResult = ExperimentResult.fromJson(
+            const aggregatorResult = await ExperimentResult.fromJson(
               this.podContext.name + "_" + activityLocation + "_aggregator_" + cache,
               startTime,
               aggregatorResultJson
@@ -275,4 +276,3 @@ if (!isMainThread && parentPort) {
       parentPort!.postMessage({ success: false, error: error.message });
     });
 }
-

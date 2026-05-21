@@ -105,7 +105,7 @@ async function runQueriesInWorker(
       .toArray()
     await store.add(roomLocations, auth.fetch.bind(auth));
 
-    const startTime = process.hrtime();
+    const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryMessageLocations, {
       sources: [ store.store ],
     }))
@@ -121,11 +121,12 @@ async function runQueriesInWorker(
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + cache,
       startTime,
-      resultIterator
+      resultIterator,
+      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
-  const startTime = process.hrtime();
+  const startTime = ExperimentResult.startMeasurement();
 
   const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
     sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
@@ -228,9 +229,9 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
             await auth.init();
             await auth.getAccessToken();
 
-            const startTime = process.hrtime();
+            const startTime = ExperimentResult.startMeasurement();
 
-            const aggregatorResult = ExperimentResult.fromJson(
+            const aggregatorResult = await ExperimentResult.fromJson(
               podContext.name + "_aggregator_" + cache,
               startTime,
               await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
