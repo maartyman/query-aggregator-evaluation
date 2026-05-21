@@ -4,7 +4,6 @@
   "description": "Evaluation of the query aggregator using a watch party and elevate use-case.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "start": "npm run build && node ./dist/main.js",
     "start-uma": "cd ../original-uma/packages/uma && yarn start",
