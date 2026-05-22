@@ -151,9 +151,9 @@ async function runExperiment(
   }
 
   await startServers(
-    "/home/maarten/Documents/doctoraat/code/original-uma/packages/uma",
-    "/home/maarten/Documents/doctoraat/code/original-uma/packages/css",
-    "/home/maarten/Documents/doctoraat/code/aggregator",
+    path.resolve("./user-managed-access/packages/uma"),
+    path.resolve("./user-managed-access/packages/css"),
+    path.resolve("./aggregator"),
     experimentLocation,
     derivedClaims,
     setup.servers,
@@ -176,7 +176,7 @@ async function runExperiment(
 
     return [...resultsLocal, ...resultsAggregator];
   } finally {
-    stopServers();
+    await stopServers();
   }
 }
 
