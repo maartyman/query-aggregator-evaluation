@@ -151,9 +151,9 @@ async function runExperiment(
   }
 
   await startServers(
-    path.resolve("./user-managed-access/packages/uma"),
-    path.resolve("./user-managed-access/packages/css"),
-    path.resolve("./aggregator"),
+    path.resolve("../user-managed-access/packages/uma"),
+    path.resolve("../user-managed-access/packages/css"),
+    path.resolve("../aggregator"),
     experimentLocation,
     derivedClaims,
     setup.servers,
