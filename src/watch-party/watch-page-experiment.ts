@@ -6,12 +6,19 @@ import {QueryEngine} from "@comunica/query-sparql";
 import {isMainThread, parentPort, Worker, workerData} from 'worker_threads';
 import {UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
-import {createAggregatorService, getAggregatorService, waitForAggregatorService} from "../utils/aggregator-functions";
+import {
+  createAggregatorService,
+  getAggregatorService,
+  getDiscoveredAggregatorService,
+  waitForAggregatorService
+} from "../utils/aggregator-functions";
 import {ExperimentSetup, PodContext} from "../data-generator";
 import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
+import {FileCacheFetch} from "../utils/file-cache-fetch";
+import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
 SELECT ?messageBoxUrl
@@ -60,7 +67,8 @@ _:MessageBoxesQuery
     a fno:Execution ;
     fno:executes trans:SPARQLEvaluation ;
     trans:queryString """${queryMessages}"""^^xsd:string ;
-    trans:sources ( _:MessageLocationsResultsSource ) .
+    trans:sources ( _:MessageLocationsResultsSource ) ;
+    trans:discoverySources ( "$room$"^^xsd:string ) .
 `;
 
 const fnoConfPerson = `${prefixes}
@@ -73,30 +81,36 @@ _:RoomsQuery
     a fno:Execution ;
     fno:executes trans:SPARQLEvaluation ;
     trans:queryString """${queryPerson}"""^^xsd:string ;
-    trans:sources ( _:MessageBoxesResultsSource ) .
+    trans:sources ( _:MessageBoxesResultsSource ) ;
+    trans:discoverySources ( "$room$"^^xsd:string ) .
 `;
 
-async function runQueriesInWorker(podContext: PodContext, room: string, cache: CachingStrategy): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
-  await auth.init();
-  await auth.getAccessToken();
+async function runQueriesInWorker(podContext: PodContext, room: string, cache: CachingStrategy, authorizationMode = "nondelegated"): Promise<ExperimentResult> {
+  const auth = authorizationMode === "no-auth" ? undefined : new Auth(podContext, {enableCache: false});
+  await auth?.init();
+  await auth?.getAccessToken();
   const engine = new QueryEngine();
+  const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
+  const queryFetch = cache === "file-cache"
+    ? new FileCacheFetch(resourceFetch).fetch
+    : resourceFetch;
 
-  if (cache === "indexed") {
+  if (cache === "indexed-cache") {
     const store = new IndexedStore();
     const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
-    await store.add([roomIri], auth.fetch.bind(auth));
+    await store.add([roomIri], resourceFetch);
 
     const messageBoxLocations = await (await engine.queryBindings(queryRoom, {
       sources: [ store.store ],
     })).map((bindings) => bindings.get('messageBoxUrl')!.value).toArray()
-    await store.add(messageBoxLocations, auth.fetch.bind(auth));
+    await store.add(messageBoxLocations, resourceFetch);
 
     const creatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
       sources: [ store.store ],
     })).map((bindings) => bindings.get('creator')!.value).toArray()
-    await store.add(creatorLocations, auth.fetch.bind(auth));
+    await store.add(creatorLocations, resourceFetch);
 
+    const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryRoom, {
       sources: [ store.store ],
@@ -114,16 +128,45 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
       podContext.name + "_" + cache,
       startTime,
       resultIterator,
-      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
+  if (cache === "file-cache") {
+    const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
+    const messageBoxLocations = await (await engine.queryBindings(queryRoom, {
+      sources: [roomIri],
+      fetch: queryFetch
+    }))
+      .map((bindings) => bindings.get('messageBoxUrl')!.value)
+      .toArray();
+
+    const creatorLocations = new Set<string>();
+    for (const messageBoxLocation of messageBoxLocations) {
+      const creators = await (await engine.queryBindings(
+        queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageBoxLocation}>`),
+        {
+          sources: [messageBoxLocation],
+          fetch: queryFetch
+        }
+      ))
+        .map((bindings) => bindings.get('creator')!.value)
+        .toArray();
+      creators.forEach(creator => creatorLocations.add(creator));
+    }
+
+    await Promise.all([ ...creatorLocations ].map(creator =>
+      queryFetch(creator, { headers: { Accept: "text/turtle" } })
+    ));
+  }
+
+  const setupHttpMetrics = await getHttpMetricsSnapshot();
   const startTime = ExperimentResult.startMeasurement();
 
   const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
   const roomBindingsStream = await engine.queryBindings(queryRoom, {
     sources: [roomIri],
-    fetch: auth.fetch.bind(auth)
+    fetch: queryFetch
   });
 
   const creators = new Set();
@@ -135,7 +178,7 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
           queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
           {
             sources: [messageboxUrl],
-            fetch: auth.fetch.bind(auth)
+            fetch: queryFetch
           }));
         done();
       },
@@ -151,7 +194,7 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
             queryPerson,
             {
               sources: [creator],
-              fetch: auth.fetch.bind(auth)
+              fetch: queryFetch
             }
           ));
           done();
@@ -162,7 +205,8 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + cache,
     startTime,
-    resultIterator
+    resultIterator,
+    { setupHttpMetrics }
   );
 }
 
@@ -189,12 +233,12 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
-          for (const cache of ["none", "tokens", "indexed"]) {
+          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
             Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             const result = await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext, roomName: this.room, cache}
+                workerData: {logLevel, podContext, roomName: this.room, cache, authorizationMode: this.experimentConfig.authorizationMode}
               });
 
               worker.on('message', (message) => {
@@ -229,6 +273,14 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, false);
+  }
+
+  async runAggregatorDiscovered(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, true);
+  }
+
+  private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
@@ -236,21 +288,31 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
+          const roomSource = `${podContext.baseUrl}/watchparties/myRooms/${this.room}/room#${this.room}`;
+          const expectedMembers = arg[0];
+          const expectedMessages = arg[0] * arg[1];
 
-          for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running aggregator experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await this.setupAggregator(podContext);
+          for (const cache of ["no-cache"]) {
+            Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${podName}, iteration ${iteration + 1}/${iterations}`);
+            await this.setupAggregator(podContext, roomSource, expectedMembers, expectedMessages);
 
-            const auth = new Auth(podContext, {enableCache: cache !== "none"});
-            await auth.init();
-            await auth.getAccessToken();
+            const auth = this.experimentConfig.authorizationMode === "no-auth"
+              ? undefined
+              : new Auth(podContext, {enableCache: false});
+            await auth?.init();
+            await auth?.getAccessToken();
+            const serviceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
 
+            const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
 
             const aggregatorResult = await ExperimentResult.fromJson(
-              podContext.name + "_aggregator_" + cache,
+              podContext.name + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
-              await getAggregatorService(auth, this.aggregatorIdStore.get(podContext.name)!)
+              discover
+                ? await getDiscoveredAggregatorService(serviceFetch, [ roomSource ], queryPerson)
+                : await getAggregatorService(serviceFetch, this.aggregatorIdStore.get(podContext.name)!),
+              { setupHttpMetrics }
             );
             results.push(aggregatorResult);
 
@@ -262,7 +324,12 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     return results;
   }
 
-  private async setupAggregator(podContext: PodContext) {
+  private async setupAggregator(
+    podContext: PodContext,
+    roomSource: string,
+    expectedMembers: number,
+    expectedMessages: number
+  ) {
     if (this.aggregatorIdStore.has(podContext.name)) {
       return;
     }
@@ -272,7 +339,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
     const roomInfoId = await createAggregatorService(auth, fnoConfRoom.replace(
       "$room$",
-      `${podContext.baseUrl}/watchparties/myRooms/${this.room}/room#${this.room}`
+      roomSource
     ));
     await waitForAggregatorService(auth, roomInfoId);
 
@@ -282,15 +349,21 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     ).replace(
       "$messageBoxUrl$",
       "?messageBox"
+    ).replace(
+      "$room$",
+      roomSource
     ));
-    await waitForAggregatorService(auth, messageBoxesId);
+    await waitForAggregatorService(auth, messageBoxesId, expectedMessages);
 
     const personId = await createAggregatorService(auth, fnoConfPerson.replace(
       "$MessageBoxes$",
       `http://localhost:5000/${messageBoxesId}/`
+    ).replace(
+      "$room$",
+      roomSource
     ))
     this.aggregatorIdStore.set(podContext.name, personId);
-    await waitForAggregatorService(auth, personId);
+    await waitForAggregatorService(auth, personId, expectedMembers);
   }
 
   public generateForWatchPage(experimentId: string, numberOfMembers: number, numberOfMessagesPerMember: number) {
@@ -410,7 +483,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 // Worker thread execution - runs when this file is loaded as a worker
 if (!isMainThread && parentPort) {
   Logger.setLevel(workerData.logLevel);
-  runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.cache)
+  runQueriesInWorker(workerData.podContext, workerData.roomName, workerData.cache, workerData.authorizationMode)
     .then(result => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })

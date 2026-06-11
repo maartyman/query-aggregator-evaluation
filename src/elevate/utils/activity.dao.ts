@@ -22,7 +22,8 @@ export class ActivityDao {
     slice?: { limit: number; offset?: number };
     type?: "select" | "count" | "ask";
     auth?: Auth;
-    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean };
+    fetch?: typeof fetch;
+    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean; descriptionOnly?: boolean; discover?: boolean; expectedBindings?: number | null };
   }): Promise<AsyncIterator<any> | Activity[] | number> {
     const sources = options?.sources
     if (sources === undefined || sources.length === 0) {
@@ -40,15 +41,20 @@ export class ActivityDao {
     options?: {
       sources?: any[];
       auth?: Auth;
+      fetch?: typeof fetch;
+      debugQuery?: (query: string) => void;
       aggregator?: {
         enabled: boolean;
         podContext: any;
         enableCache: boolean;
+        descriptionOnly?: boolean;
+        discover?: boolean;
+        expectedBindings?: number | null;
       }
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     const activityIri = typeof id === 'string' ? id : String(id);
-    const sources = options?.sources || [activityIri, "https://solidlabresearch.github.io/activity-ontology/"];
+    const sources = options?.sources || [activityIri.split("#")[0]];
     return await this.activityMapping.query(sources as [string, ...string[]], {
         boundKeys: [
           {
@@ -60,7 +66,9 @@ export class ActivityDao {
           limit: 1
         },
         aggregator: options?.aggregator,
-        auth: options?.auth
+        auth: options?.auth,
+        fetch: options?.fetch,
+        debugQuery: options?.debugQuery
       })
   }
 
@@ -72,7 +80,8 @@ export class ActivityDao {
     boundKeys?: { key: string; value: any }[];
     filterKeys?: { key: string; relationKeyToValue: string; value: string | number | boolean | Date }[];
     auth?: Auth;
-    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean };
+    fetch?: typeof fetch;
+    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean; descriptionOnly?: boolean; discover?: boolean; expectedBindings?: number | null };
   }): Promise<number> {
     const sources = options?.sources
     if (sources === undefined || sources.length === 0) {
@@ -108,6 +117,7 @@ export class ActivityDao {
       filterKeys: options.filterKeys,
       type: "count",
       auth: options.auth,
+      fetch: options.fetch,
       aggregator: options.aggregator
     }) as Promise<number>;
   }

@@ -11,6 +11,8 @@ import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {AsyncIterator} from "asynciterator";
 import {IndexedStore} from "../utils/indexed-store";
+import {FileCacheFetch} from "../utils/file-cache-fetch";
+import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
 const SelectedColumnsMap: Record<string, {
   keys: string[],
@@ -83,11 +85,16 @@ async function runQueriesInWorker(
   podContext: PodContext,
   activityLocations: string[],
   selectedColumns: string,
-  cache: CachingStrategy
+  cache: CachingStrategy,
+  authorizationMode = "nondelegated"
 ): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
-  await auth.init();
-  await auth.getAccessToken();
+  const auth = authorizationMode === "no-auth" ? undefined : new Auth(podContext, {enableCache: false});
+  await auth?.init();
+  await auth?.getAccessToken();
+  const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
+  const queryFetch = cache === "file-cache"
+    ? new FileCacheFetch(resourceFetch).fetch
+    : resourceFetch;
 
   const columnConfig = SelectedColumnsMap[selectedColumns];
   if (!columnConfig) {
@@ -97,14 +104,14 @@ async function runQueriesInWorker(
   const activitySources = activityLocations.map(location =>
     `${podContext.baseUrl}/activities/${location}`
   );
-  activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
   const activityDao = new ActivityDao();
 
-  if (cache === "indexed") {
+  if (cache === "indexed-cache") {
     const store = new IndexedStore();
-    await store.add(activitySources, auth.fetch.bind(auth));
+    await store.add(activitySources, resourceFetch);
 
+    const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
 
     await activityDao.count({
@@ -122,15 +129,23 @@ async function runQueriesInWorker(
       podContext.name + "_" + selectedColumns + "_" + cache,
       startTime,
       resultIterator,
-      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
+  if (cache === "file-cache") {
+    await Promise.all(activitySources.map(source =>
+      queryFetch(source, { headers: { Accept: "text/turtle" } })
+    ));
+  }
+
+  const setupHttpMetrics = await getHttpMetricsSnapshot();
   const startTime = ExperimentResult.startMeasurement();
 
   await activityDao.count({
     sources: activitySources,
-    auth
+    auth,
+    fetch: queryFetch
   });
 
   const resultIterator = await activityDao.find({
@@ -138,13 +153,15 @@ async function runQueriesInWorker(
     keys: columnConfig.keys,
     filterKeys: columnConfig.filterKeys,
     ...(columnConfig.sort && { sort: columnConfig.sort }),
-    auth
+    auth,
+    fetch: queryFetch
   });
 
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + selectedColumns + "_" + cache,
     startTime,
-    resultIterator
+    resultIterator,
+    { setupHttpMetrics }
   );
 }
 
@@ -182,7 +199,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     const activitySources = activityLocations.map(location =>
       `${podContext.baseUrl}/activities/${location}`
     );
-    activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
     const activityDao = new ActivityDao();
 
@@ -195,7 +211,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       aggregator: {
         enabled: true,
         podContext: podContext,
-        enableCache: true
+        enableCache: true,
+        expectedBindings: 1
       },
       auth: auth
     });
@@ -207,13 +224,50 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       aggregator: {
         enabled: true,
         podContext: podContext,
-        enableCache: true
+        enableCache: true,
+        expectedBindings: activityLocations.length
       },
       auth: auth
     });
 
+    await this.registerScenarioServiceDescriptions(auth, activityDao, podContext, activitySources);
+
     // Mark as initialized for this pod/query combination
     this.aggregatorIdStore.set(cacheKey, 'initialized');
+  }
+
+  private async registerScenarioServiceDescriptions(
+    auth: Auth,
+    activityDao: ActivityDao,
+    podContext: PodContext,
+    activitySources: string[]
+  ): Promise<void> {
+    await activityDao.count({
+      sources: activitySources,
+      aggregator: {
+        enabled: true,
+        podContext,
+        enableCache: true,
+        descriptionOnly: true
+      },
+      auth
+    });
+
+    for (const columnConfig of Object.values(SelectedColumnsMap)) {
+      await activityDao.find({
+        sources: activitySources,
+        keys: columnConfig.keys,
+        filterKeys: columnConfig.filterKeys,
+        ...(columnConfig.sort && { sort: columnConfig.sort }),
+        aggregator: {
+          enabled: true,
+          podContext,
+          enableCache: true,
+          descriptionOnly: true
+        },
+        auth
+      });
+    }
   }
 
   generate(): ExperimentSetup {
@@ -292,12 +346,12 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of ["none", "tokens", "indexed"]) {
+          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
             Logger.info(`Running local experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache}
+                workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache, authorizationMode: this.experimentConfig.authorizationMode}
               });
 
               worker.on('message', (message) => {
@@ -332,6 +386,14 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, false);
+  }
+
+  async runAggregatorDiscovered(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, true);
+  }
+
+  private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
@@ -352,18 +414,18 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
           await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
-          for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
+          for (const cache of ["no-cache"]) {
+            Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, iteration ${iteration + 1}/${iterations}`);
+            const auth = new Auth(this.podContext, {enableCache: false});
             await auth.init();
             await auth.getAccessToken();
 
+            const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
 
             const activitySources = activityLocations.map(location =>
               `${this.podContext!.baseUrl}/activities/${location}`
             );
-            activitySources.push("https://solidlabresearch.github.io/activity-ontology/");
 
             const columnConfig = SelectedColumnsMap[selectedColumns];
             if (!columnConfig) {
@@ -376,7 +438,9 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache !== "none"
+                enableCache: false,
+                discover,
+                expectedBindings: 1
               },
               auth
             });
@@ -389,7 +453,9 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache !== "none"
+                enableCache: false,
+                discover,
+                expectedBindings: numberOfActivities
               },
               auth
             });
@@ -414,9 +480,10 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             };
 
             const aggregatorResult = await ExperimentResult.fromJson(
-              this.podContext.name + "_" + selectedColumns + "_aggregator_" + cache,
+              this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
-              aggregatorResultJson
+              aggregatorResultJson,
+              { setupHttpMetrics }
             );
             results.push(aggregatorResult);
 
@@ -431,7 +498,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
 if (!isMainThread && parentPort) {
   Logger.setLevel(workerData.logLevel);
-  runQueriesInWorker(workerData.podContext, workerData.activityLocations, workerData.selectedColumns, workerData.cache)
+  runQueriesInWorker(workerData.podContext, workerData.activityLocations, workerData.selectedColumns, workerData.cache, workerData.authorizationMode)
     .then((result: ExperimentResult) => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })

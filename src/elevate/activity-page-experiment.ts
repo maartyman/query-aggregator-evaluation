@@ -10,25 +10,33 @@ import fs from "node:fs";
 import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
+import {FileCacheFetch} from "../utils/file-cache-fetch";
+import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
-async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy): Promise<ExperimentResult> {
-  const auth = new Auth(podContext, {enableCache: (cache !== "none")});
-  await auth.init();
-  await auth.getAccessToken();
+async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy, authorizationMode = "nondelegated"): Promise<ExperimentResult> {
+  const auth = authorizationMode === "no-auth" ? undefined : new Auth(podContext, {enableCache: false});
+  await auth?.init();
+  await auth?.getAccessToken();
+  const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
+  const queryFetch = cache === "file-cache"
+    ? new FileCacheFetch(resourceFetch).fetch
+    : resourceFetch;
 
   const activityUrl = `${podContext.baseUrl}/activities/${activityLocation}`;
   const activityIri = `${activityUrl}#activity`;
 
   const activityDao = new ActivityDao();
 
-  if (cache === "indexed") {
+  if (cache === "indexed-cache") {
     const store = new IndexedStore();
-    await store.add([activityUrl, "https://solidlabresearch.github.io/activity-ontology/"], auth.fetch.bind(auth));
+    await store.add([activityUrl], resourceFetch);
 
+    const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
 
     const resultIterator = await activityDao.getById(activityIri, {
       auth,
+      fetch: queryFetch,
       sources: [store.store] as any
     });
 
@@ -36,14 +44,23 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
       podContext.name + "_" + activityLocation + "_" + cache,
       startTime,
       resultIterator,
-      { numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
     );
   }
 
+  if (cache === "file-cache") {
+    await queryFetch(activityUrl, { headers: { Accept: "text/turtle" } });
+  }
+
+  const setupHttpMetrics = await getHttpMetricsSnapshot();
   const startTime = ExperimentResult.startMeasurement();
 
   const runQuery = async () => {
-    return await activityDao.getById(activityIri, { auth });
+    return await activityDao.getById(activityIri, {
+      auth,
+      fetch: queryFetch,
+      sources: [activityUrl]
+    });
   };
 
   const resultIterator = await runQuery();
@@ -51,7 +68,8 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
   return await ExperimentResult.fromIterator(
     podContext.name + "_" + activityLocation + "_" + cache,
     startTime,
-    resultIterator
+    resultIterator,
+    { setupHttpMetrics }
   );
 }
 
@@ -92,7 +110,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
       aggregator: {
         enabled: true,
         podContext: podContext,
-        enableCache: true
+        enableCache: true,
+        expectedBindings: 1
       },
       auth: auth
     });
@@ -157,12 +176,12 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
           const activityLocation = "activity";
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
-          for (const cache of ["none", "tokens", "indexed"]) {
+          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
             Logger.info(`Running local experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
               const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext: this.podContext, activityLocation, cache}
+                workerData: {logLevel, podContext: this.podContext, activityLocation, cache, authorizationMode: this.experimentConfig.authorizationMode}
               });
 
               worker.on('message', (message) => {
@@ -208,14 +227,15 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of ["none", "tokens"]) {
-            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
+          for (const cache of ["no-cache"]) {
+            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocation);
 
-            const auth = new Auth(this.podContext, {enableCache: cache !== "none"});
+            const auth = new Auth(this.podContext, {enableCache: false});
             await auth.init();
             await auth.getAccessToken();
 
+            const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
 
             const activityUrl = `${this.podContext.baseUrl}/activities/${activityLocation}`;
@@ -226,7 +246,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               aggregator: {
                 enabled: true,
                 podContext: this.podContext,
-                enableCache: cache !== "none"
+                enableCache: false,
+                expectedBindings: 1
               },
               auth
             });
@@ -251,9 +272,10 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             };
 
             const aggregatorResult = await ExperimentResult.fromJson(
-              this.podContext.name + "_" + activityLocation + "_aggregator_" + cache,
+              this.podContext.name + "_" + activityLocation + "_aggregator",
               startTime,
-              aggregatorResultJson
+              aggregatorResultJson,
+              { setupHttpMetrics }
             );
             results.push(aggregatorResult);
 
@@ -268,7 +290,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
 if (!isMainThread && parentPort) {
   Logger.setLevel(workerData.logLevel);
-  runQueriesInWorker(workerData.podContext, workerData.activityLocation, workerData.cache)
+  runQueriesInWorker(workerData.podContext, workerData.activityLocation, workerData.cache, workerData.authorizationMode)
     .then((result: ExperimentResult) => {
       parentPort!.postMessage({ success: true, result: result.serialize() });
     })

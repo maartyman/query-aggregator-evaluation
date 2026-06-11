@@ -4,6 +4,7 @@ export type HttpRequestKind = 'resource' | 'authorizationToken';
 
 export interface HttpMetricsSnapshot {
   totalHttpRequests: number;
+  totalHTTPRequests: number;
   resourceRequests: number;
   authorizationTokenRequests: number;
   numberOfTriples: number;
@@ -95,13 +96,42 @@ export function trackResponseTriples(
 
 export async function getHttpMetricsSnapshot(): Promise<HttpMetricsSnapshot> {
   await Promise.allSettled(pendingTripleCounts);
+  const totalHttpRequests = resourceRequests + authorizationTokenRequests;
 
   return {
-    totalHttpRequests: resourceRequests + authorizationTokenRequests,
+    totalHttpRequests,
+    totalHTTPRequests: totalHttpRequests,
     resourceRequests,
     authorizationTokenRequests,
     numberOfTriples
   };
+}
+
+export function combineHttpMetrics(
+  left: HttpMetricsSnapshot,
+  right: HttpMetricsSnapshot
+): HttpMetricsSnapshot {
+  const totalHttpRequests = left.totalHttpRequests + right.totalHttpRequests;
+  return {
+    totalHttpRequests,
+    totalHTTPRequests: totalHttpRequests,
+    resourceRequests: left.resourceRequests + right.resourceRequests,
+    authorizationTokenRequests: left.authorizationTokenRequests + right.authorizationTokenRequests,
+    numberOfTriples: left.numberOfTriples + right.numberOfTriples,
+  };
+}
+
+export function createMeasuredFetch(sourceFetch: typeof fetch = fetch): typeof fetch {
+  return (async (input, init) => {
+    const requestKind = classifyHttpRequest(input);
+    const method = init?.method || (input instanceof Request ? input.method : 'GET');
+    const url = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : input.url);
+
+    recordHttpRequest(requestKind);
+    const response = await sourceFetch(input, init);
+    trackResponseTriples(response, requestKind, method, url);
+    return response;
+  }) as typeof fetch;
 }
 
 function extractRdfBody(body: string, contentType: string): string | null {

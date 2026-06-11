@@ -11,7 +11,13 @@ import {
   ZoneModel
 } from "./elevate-types";
 import { getAggregatorIdStore } from "../../utils/aggregator-id-store";
-import { createAggregatorService, getAggregatorService, waitForAggregatorService } from "../../utils/aggregator-functions";
+import {
+  createAggregatorService,
+  getDiscoveredAggregatorService,
+  getAggregatorService,
+  registerAggregatorServiceDescription,
+  waitForAggregatorService
+} from "../../utils/aggregator-functions";
 import { PodContext } from "../../data-generator";
 import { Auth } from "../../utils/auth";
 
@@ -91,8 +97,13 @@ export class ActivityRDFRead {
         enabled: boolean;
         podContext: PodContext;
         enableCache: boolean;
+        descriptionOnly?: boolean;
+        discover?: boolean;
+        expectedBindings?: number | null;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
+      debugQuery?: (query: string) => void;
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     if (!options) {
@@ -245,23 +256,25 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
       throw new Error("ASK queries are not yet implemented in ActivityRDFMapper.");
     }
 
+    options.debugQuery?.(query);
+
     // Check if aggregator is enabled
     if (options.aggregator?.enabled && options.aggregator.podContext) {
       const store = getAggregatorIdStore();
-      const serviceKey = store.buildActivityQueryKey(sources, {
-        keys: options.keys,
-        boundKeys: options.boundKeys,
-        filterKeys: options.filterKeys,
-        sort: options.sort,
-        slice: options.slice,
-        type: options.type
-      });
+      const serviceKey = store.buildServiceKey(query, sources, options.type);
       if (!options.auth) {
         throw new Error("Auth is required when using aggregator.");
       }
 
+      if (options.aggregator.descriptionOnly) {
+        await this.registerAggregatorServiceDescription(options.auth, query, sources, serviceKey);
+        return options.type === "count" ? 0 : [];
+      }
+
       // Get results from aggregator
-      const aggregatorResults = await this.queryViaAggregator(options.auth, query, sources, serviceKey);
+      const aggregatorResults = options.aggregator.discover
+        ? await getDiscoveredAggregatorService(options.auth, sources, query)
+        : await this.queryViaAggregator(options.auth, query, sources, serviceKey, options.aggregator.expectedBindings);
 
       // Return count directly if count query
       if (options.type === "count") {
@@ -340,10 +353,6 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
           }
         }
 
-        // Handle subqueries (flags, laps, peaks, zones) if needed
-        const completeActivity = !options.keys || options.keys.length === 0;
-        const needsFlags = options.keys?.some((key: string) => key === "activity_flags");
-
         if (completeActivity || needsFlags) {
           activity.flags = await this.queryFlags(activityIri!, sources, options);
         }
@@ -369,7 +378,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
     // Use Comunica query engine (original path)
     let bindingsStream = await this.queryEngine.queryBindings(query, {
       sources: sources,
-      fetch: options.auth ? options.auth.fetch.bind(options.auth) : undefined
+      fetch: options.fetch ?? (options.auth ? options.auth.fetch.bind(options.auth) : undefined)
     });
 
     if (options.type === "count") {
@@ -634,6 +643,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
         enableCache: boolean;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
     }
   ): Promise<Lap[] | null> {
     const queryString = `
@@ -758,7 +768,7 @@ ORDER BY ?lapIndex
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
         sources,
-        fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
+        fetch: options?.fetch ?? (options?.auth ? options.auth.fetch.bind(options.auth) : undefined)
       });
 
       const laps = await bindingsStream
@@ -803,6 +813,7 @@ ORDER BY ?lapIndex
         enableCache: boolean;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
     }
   ): Promise<ActivityFlag[] | null> {
     const queryString = `
@@ -849,7 +860,7 @@ SELECT ?index WHERE {
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
         sources: sources,
-        fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
+        fetch: options?.fetch ?? (options?.auth ? options.auth.fetch.bind(options.auth) : undefined)
       });
 
       const result = await bindingsStream
@@ -872,6 +883,7 @@ SELECT ?index WHERE {
         enableCache: boolean;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
     }
   ): Promise<Peak[] | null> {
     const queryString = `
@@ -913,7 +925,7 @@ ORDER BY ?peakDuration
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
         sources,
-        fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
+        fetch: options?.fetch ?? (options?.auth ? options.auth.fetch.bind(options.auth) : undefined)
       });
 
       const result = await bindingsStream
@@ -941,6 +953,7 @@ ORDER BY ?peakDuration
         enableCache: boolean;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
     }
   ): Promise<ZoneModel[] | null> {
     const queryString = `
@@ -1000,7 +1013,7 @@ SELECT * WHERE {
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
         sources,
-        fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
+        fetch: options?.fetch ?? (options?.auth ? options.auth.fetch.bind(options.auth) : undefined)
       });
 
       let totalTime = 0;
@@ -1044,6 +1057,7 @@ SELECT * WHERE {
         enableCache: boolean;
       };
       auth?: Auth;
+      fetch?: typeof fetch;
     }
   ): Promise<ZoneModel[] | null> {
     const queryString = `
@@ -1112,7 +1126,7 @@ ORDER BY ?zoneIndex
       // Use Comunica query engine
       const bindingsStream = await this.queryEngine.queryBindings(queryString, {
         sources,
-        fetch: options?.auth ? options.auth.fetch.bind(options.auth) : undefined
+        fetch: options?.fetch ?? (options?.auth ? options.auth.fetch.bind(options.auth) : undefined)
       });
 
       const zones: ZoneModel[] = [];
@@ -1165,7 +1179,8 @@ _:Query
     auth: Auth,
     queryString: string,
     sources: string[],
-    serviceKey: string
+    serviceKey: string,
+    expectedBindings: number | null = 1
   ): Promise<string> {
     const store = getAggregatorIdStore();
 
@@ -1178,9 +1193,27 @@ _:Query
       serviceId = await createAggregatorService(auth, fnoConfig);
 
       // Wait for the service to be up-to-date
-      await waitForAggregatorService(auth, serviceId);
+      await waitForAggregatorService(auth, serviceId, expectedBindings);
 
       // Store the service ID for future use
+      store.set(serviceKey, serviceId);
+    }
+
+    return serviceId;
+  }
+
+  private async registerAggregatorServiceDescription(
+    auth: Auth,
+    queryString: string,
+    sources: string[],
+    serviceKey: string
+  ): Promise<string> {
+    const store = getAggregatorIdStore();
+    let serviceId = store.get(serviceKey);
+
+    if (!serviceId) {
+      const fnoConfig = this.buildFnoConfig(queryString, sources);
+      serviceId = await registerAggregatorServiceDescription(auth, fnoConfig);
       store.set(serviceKey, serviceId);
     }
 
@@ -1194,9 +1227,10 @@ _:Query
     auth: Auth,
     queryString: string,
     sources: string[],
-    serviceKey: string
+    serviceKey: string,
+    expectedBindings: number | null = 1
   ): Promise<any> {
-    const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey);
+    const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey, expectedBindings);
     return await getAggregatorService(auth, serviceId);
   }
 }

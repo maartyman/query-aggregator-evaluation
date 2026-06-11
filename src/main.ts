@@ -1,4 +1,4 @@
-import {startServers, stopServers} from "./utils/server-functions";
+import {type AuthorizationMode, startServers, stopServers} from "./utils/server-functions";
 import * as path from 'path';
 import * as fs from 'fs';
 import type {Experiment} from "./experiment";
@@ -41,7 +41,8 @@ export interface LoggingOptions {
 
 export interface ExperimentConfig {
   type: string;
-  derivedClaims?: boolean;
+  authorizationModes?: AuthorizationMode[];
+  delegatedAuth?: boolean;
   iterations: Array<{
     iterationName: string;
     args: any[][];
@@ -55,8 +56,39 @@ export interface Config {
   experiments: Record<string, ExperimentConfig>;
 }
 
-const WARMUP_RUNS = 1;
-const RECORDED_RUNS = 30;
+function getNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative number, got: ${value}`);
+  }
+  return Math.floor(parsed);
+}
+
+const WARMUP_RUNS = getNonNegativeIntegerEnv("WARMUP_RUNS", 1);
+const RECORDED_RUNS = getNonNegativeIntegerEnv("RECORDED_RUNS", 30);
+
+function getLoggingOptionsFromEnv(): LoggingOptions | undefined {
+  const loggingOptions: LoggingOptions = {};
+  if (process.env.EXPERIMENT_LOG_LEVEL) {
+    loggingOptions.experiment = process.env.EXPERIMENT_LOG_LEVEL as LogLevel;
+  }
+  if (process.env.AGGREGATOR_LOG_LEVEL) {
+    loggingOptions.aggregator = process.env.AGGREGATOR_LOG_LEVEL;
+  }
+  if (process.env.UMA_LOG_LEVEL) {
+    loggingOptions.uma = process.env.UMA_LOG_LEVEL;
+  }
+  if (process.env.CSS_LOG_LEVEL) {
+    loggingOptions.css = process.env.CSS_LOG_LEVEL;
+  }
+
+  return Object.keys(loggingOptions).length > 0 ? loggingOptions : undefined;
+}
 
 function getIterationMetadata(
   experimentId: string,
@@ -98,7 +130,7 @@ async function runExperiment(
   experimentName: string,
   experimentConfig: ExperimentConfig,
   useExistingData: boolean,
-  derivedClaims: boolean,
+  authorizationMode: AuthorizationMode,
   loggingOptions?: LoggingOptions
 ): Promise<ExperimentResult[]> {
   if (loggingOptions?.experiment) {
@@ -109,30 +141,31 @@ async function runExperiment(
   let experiment: Experiment | null = null;
   let setup: ExperimentSetup | null = null;
 
-  const configWithDerivedClaims = {
+  const configWithAuthorizationMode = {
     ...experimentConfig,
-    derivedClaims,
+    authorizationMode,
+    delegatedAuth: authorizationMode === "delegated",
     podsPerServer: experimentConfig.podsPerServer
   };
 
   switch (experimentConfig.type) {
     case "watchparty-overview-page":
-      experiment = new OverviewPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new OverviewPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     case "watchparty-watch-page":
-      experiment = new WatchPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new WatchPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     case "elevate-activity-page":
-      experiment = new ActivityPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new ActivityPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     case "elevate-activities-page":
-      experiment = new ActivitiesPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new ActivitiesPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     case "elevate-fitness-trend-page":
-      experiment = new ActivitiesPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new ActivitiesPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     case "elevate-yearly-progression-page":
-      experiment = new ActivitiesPageExperiment(experimentLocation, configWithDerivedClaims);
+      experiment = new ActivitiesPageExperiment(experimentLocation, configWithAuthorizationMode);
       break;
     default:
       throw new Error(`Unknown experiment type: ${experimentConfig.type}`);
@@ -151,11 +184,11 @@ async function runExperiment(
   }
 
   await startServers(
-    path.resolve("../user-managed-access/packages/uma"),
-    path.resolve("../user-managed-access/packages/css"),
-    path.resolve("../aggregator"),
+    path.resolve("./user-managed-access/packages/uma"),
+    path.resolve("./user-managed-access/packages/css"),
+    path.resolve("./aggregator"),
     experimentLocation,
-    derivedClaims,
+    authorizationMode,
     setup.servers,
     setup.queryUser,
     loggingOptions
@@ -164,17 +197,30 @@ async function runExperiment(
   getAggregatorIdStore().clear();
 
   try {
-    console.log(`Running ${WARMUP_RUNS} warmup run(s) for local conditions...`);
-    await experiment.runLocal(WARMUP_RUNS);
-    console.log(`Running ${WARMUP_RUNS} warmup run(s) for aggregator conditions...`);
-    await experiment.runAggregator(WARMUP_RUNS);
+    if (WARMUP_RUNS > 0) {
+      console.log(`Running ${WARMUP_RUNS} warmup run(s) for local conditions...`);
+      await experiment.runLocal(WARMUP_RUNS);
+      console.log(`Running ${WARMUP_RUNS} warmup run(s) for aggregator conditions...`);
+      await experiment.runAggregator(WARMUP_RUNS);
+      if (experiment.runAggregatorDiscovered) {
+        console.log(`Running ${WARMUP_RUNS} warmup run(s) for discovered aggregator conditions...`);
+        await experiment.runAggregatorDiscovered(WARMUP_RUNS);
+      }
+    } else {
+      console.log("Skipping warmup runs.");
+    }
 
     console.log(`Running ${RECORDED_RUNS} recorded run(s) for local conditions...`);
     const resultsLocal = await experiment.runLocal(RECORDED_RUNS);
     console.log(`Running ${RECORDED_RUNS} recorded run(s) for aggregator conditions...`);
     const resultsAggregator = await experiment.runAggregator(RECORDED_RUNS);
+    let resultsAggregatorDiscovered: ExperimentResult[] = [];
+    if (experiment.runAggregatorDiscovered) {
+      console.log(`Running ${RECORDED_RUNS} recorded run(s) for discovered aggregator conditions...`);
+      resultsAggregatorDiscovered = await experiment.runAggregatorDiscovered(RECORDED_RUNS);
+    }
 
-    return [...resultsLocal, ...resultsAggregator];
+    return [...resultsLocal, ...resultsAggregator, ...resultsAggregatorDiscovered];
   } finally {
     await stopServers();
   }
@@ -196,6 +242,7 @@ async function main() {
 
   const failedExperiments: Array<{name: string, error: any}> = [];
   const successfulExperiments: string[] = [];
+  const loggingOptions = getLoggingOptionsFromEnv();
 
   for (const [experimentName, experimentConfig] of Object.entries(config.experiments)) {
     console.log(`\n========================================`);
@@ -205,26 +252,27 @@ async function main() {
     const podsPerServer = experimentConfig.podsPerServer ?? config.podsPerServer;
     const configWithPods = { ...experimentConfig, podsPerServer };
 
-    const derivedClaimsValues: boolean[] =
-      experimentConfig.derivedClaims === undefined
-        ? [false, true]
-        : [experimentConfig.derivedClaims];
+    const authorizationModes: AuthorizationMode[] = experimentConfig.authorizationModes ??
+      (experimentConfig.delegatedAuth === undefined
+        ? ["no-auth", "nondelegated", "delegated"]
+        : [experimentConfig.delegatedAuth ? "delegated" : "nondelegated"]);
 
-    for (const derivedClaims of derivedClaimsValues) {
-      const suffix = experimentConfig.derivedClaims === undefined
-        ? (derivedClaims ? '-derived' : '-nonderived')
+    for (const authorizationMode of authorizationModes) {
+      const suffix = experimentConfig.authorizationModes === undefined && experimentConfig.delegatedAuth === undefined
+        ? `-${authorizationMode}`
         : '';
 
       const fullExperimentName = `${experimentName}${suffix}`;
 
-      console.log(`Running ${fullExperimentName} (derivedClaims: ${derivedClaims})...`);
+      console.log(`Running ${fullExperimentName} (authorizationMode: ${authorizationMode})...`);
 
       try {
         const results = await runExperiment(
           experimentName,
           configWithPods,
           config.useExistingData ?? false,
-          derivedClaims
+          authorizationMode,
+          loggingOptions
         );
 
         const resultRunCounts = new Map<string, number>();
@@ -237,7 +285,8 @@ async function main() {
 
             result.parameters.experimentName = experimentName;
             result.parameters.experimentType = experimentConfig.type;
-            result.parameters.derivedClaims = derivedClaims;
+            result.parameters.authorizationMode = authorizationMode;
+            result.parameters.delegatedAuth = authorizationMode === "delegated";
             result.parameters.podsPerServer = podsPerServer;
             result.parameters.useExistingData = config.useExistingData ?? false;
             result.parameters.warmupRuns = WARMUP_RUNS;
@@ -253,12 +302,16 @@ async function main() {
 
             if (idParts.includes('aggregator')) {
               result.parameters.useAggregator = true;
-              const cacheIndex = idParts.indexOf('aggregator') + 1;
+              const aggregatorIndex = idParts.indexOf('aggregator');
+              const discovered = idParts[aggregatorIndex + 1] === 'discovered';
+              result.parameters.executionType = discovered ? 'aggregator-discovered' : 'aggregator';
+              const cacheIndex = aggregatorIndex + (discovered ? 2 : 1);
               if (cacheIndex < idParts.length) {
                 result.parameters.cacheStrategy = idParts[cacheIndex];
               }
             } else {
               result.parameters.useAggregator = false;
+              result.parameters.executionType = idParts[idParts.length - 1] === 'indexed-cache' ? 'local-indexed-cache' : 'local';
               if (idParts.length > 0) {
                 result.parameters.cacheStrategy = idParts[idParts.length - 1];
               }
@@ -272,8 +325,6 @@ async function main() {
             const resultFileName = `${result.experimentId}_run-${runLabel}${suffix}.json`;
             const resultPath = path.join(resultsDir, resultFileName);
             result.save(resultPath);
-            console.log(`Saved result to: ${resultPath}`);
-            result.print();
           } catch (saveError) {
             console.error(`✗ Failed to save result for ${result.experimentId}:`, saveError);
           }

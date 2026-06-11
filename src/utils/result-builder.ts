@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { getHttpMetricsSnapshot, resetHttpMetrics } from './http-metrics';
+import { combineHttpMetrics, getHttpMetricsSnapshot, resetHttpMetrics } from './http-metrics';
 
 export class ExperimentResult {
   public experimentId: string;
@@ -57,13 +57,6 @@ export class ExperimentResult {
    * Print result in a human-readable format
    */
   public print(): void {
-    console.log(`\n=== Query Result: ${this.experimentId} ===`);
-    console.log(`Total Results: ${this.totalResults}`);
-    console.log(`Total Duration: ${this.totalDuration.toFixed(2)}ms`);
-    console.log(`Dief@100ms: ${this.dief100ms.toFixed(2)}`);
-    console.log(`Dief@1s: ${this.dief1s.toFixed(2)}`);
-    console.log(`Dief@10s: ${this.dief10s.toFixed(2)}`);
-    console.log(`===================================\n`);
   }
 
   /**
@@ -108,7 +101,10 @@ export class ExperimentResult {
           return;
         }
 
-        getHttpMetricsSnapshot().then(metrics => resolve(new ExperimentResult(
+        getHttpMetricsSnapshot().then(metrics => {
+          const { setupHttpMetrics, ...cleanParameters } = parameters ?? {};
+          const combinedMetrics = setupHttpMetrics ? combineHttpMetrics(setupHttpMetrics, metrics) : metrics;
+          resolve(new ExperimentResult(
           experimentId,
           totalDuration,
           this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
@@ -117,11 +113,12 @@ export class ExperimentResult {
           timestamps,
           timestamps.length,
           {
-            ...metrics,
+            ...combinedMetrics,
             queryResultCount: timestamps.length,
-            ...parameters
+            ...cleanParameters
           }
-        ))).catch(reject);
+        ));
+        }).catch(reject);
       });
 
       resultIterator.on('error', (error: any) => {
@@ -153,6 +150,8 @@ export class ExperimentResult {
     }
 
     const metrics = await getHttpMetricsSnapshot();
+    const { setupHttpMetrics, ...cleanParameters } = parameters ?? {};
+    const combinedMetrics = setupHttpMetrics ? combineHttpMetrics(setupHttpMetrics, metrics) : metrics;
 
     return new ExperimentResult(
       experimentId,
@@ -163,9 +162,9 @@ export class ExperimentResult {
       timestamps,
       timestamps.length,
       {
-        ...metrics,
+        ...combinedMetrics,
         queryResultCount: timestamps.length,
-        ...parameters
+        ...cleanParameters
       }
     );
   }

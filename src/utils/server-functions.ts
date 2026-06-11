@@ -3,6 +3,8 @@ import path from "node:path";
 import {PodContext, ServerInstanceContext} from "../data-generator";
 import type {LoggingOptions} from "../main";
 
+export type AuthorizationMode = "no-auth" | "nondelegated" | "delegated";
+
 let trackedServers: ServerInstanceContext[] = [];
 const trackedProcesses = new Map<number, { child: ChildProcess; label: string }>();
 
@@ -29,7 +31,6 @@ async function killProcessOnPort(port: number): Promise<void> {
   if (pids.length === 0) {
     return;
   }
-  console.log(`Killing processes on port ${port}: ${pids.join(', ')}`);
   const killResult = await execCommand(`kill ${pids.join(' ')}`);
   if (killResult.stderr) {
     console.error(`Stderr while killing processes on port ${port}: ${killResult.stderr}`);
@@ -69,7 +70,6 @@ function runCommand(command: string, label: string, debug: boolean): ChildProces
     if (child.pid) {
       trackedProcesses.delete(child.pid);
     }
-    console.log(`[${label}] exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
     if (code && stderrBuffer.trim()) {
       console.error(`[${label}] stderr before exit:\n${stderrBuffer.trim()}`);
     }
@@ -94,21 +94,18 @@ async function stopTrackedProcesses(): Promise<void> {
         // Ignore already exited processes.
       }
     }
-    console.log(`[${label}] sent SIGTERM`);
   }
 
   await new Promise(resolve => setTimeout(resolve, 1000));
 }
 
 export async function stopServers(servers: ServerInstanceContext[] = trackedServers): Promise<void> {
-  console.log("Stopping existing servers...");
   await stopTrackedProcesses();
   await killProcessOnPort(5000); // aggregator port
   await Promise.all(servers.flatMap(server => [
     killProcessOnPort(server.umaPort),
     killProcessOnPort(server.solidPort)
   ]));
-  console.log("Server shutdown complete");
 }
 
 export async function startServers(
@@ -116,14 +113,13 @@ export async function startServers(
   cssLocation: string,
   aggregatorLocation: string,
   dataLocation: string,
-  derivedAuth: boolean,
+  authorizationMode: AuthorizationMode,
   servers: ServerInstanceContext[],
   queryUser: PodContext,
   loggingOptions?: LoggingOptions
 ): Promise<void> {
   trackedServers = servers;
 
-  console.log("Cleaning up existing processes...");
   await stopTrackedProcesses();
   await killProcessOnPort(5000);
   await Promise.all(servers.flatMap(server => [
@@ -133,9 +129,13 @@ export async function startServers(
   await new Promise(resolve => setTimeout(resolve, 1000));
 
   for (const server of servers) {
-    console.log(`Starting UMA server-${server.index} on port ${server.umaPort}...`);
     const umaLogLevel = loggingOptions?.uma ?? 'error';
-    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${derivedAuth? "./config/derivation.json" : "./config/default.json"} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}`;
+    const umaConfigLocation = authorizationMode === "no-auth"
+      ? "./config/no-auth.json"
+      : authorizationMode === "nondelegated"
+        ? "./config/nondelegated.json"
+        : "./config/delegated.json";
+    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}`;
     runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
   }
 
@@ -143,10 +143,9 @@ export async function startServers(
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   for (const server of servers) {
-    console.log(`Starting CSS server-${server.index} on port ${server.solidPort}...`);
     const serverDataPath = path.join(dataLocation, server.relativePath);
     const cssLogLevel = loggingOptions?.css ?? 'error';
-    const command = `cd "${cssLocation}" && yarn run community-solid-server -m . -c ./config/default.json -a ${server.umaBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
+    const command = `cd "${cssLocation}" && node bin/community-solid-server-isolated.js -m . -c ./config/default.json --baseUrl ${server.solidBaseUrl} --authServer ${server.umaBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
     runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
   }
 

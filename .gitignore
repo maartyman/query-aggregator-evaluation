@@ -2,6 +2,8 @@
 experiment-data/
 results/
 .aggregators.json
+.file-cache/
+tmp/
 
 # Logs
 logs
