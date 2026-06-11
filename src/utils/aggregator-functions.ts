@@ -373,7 +373,7 @@ async function drainResponse(response: Response): Promise<void> {
   }
 }
 
-export async function waitForAggregatorService(auth: Auth, serviceId: string, expectedBindings: number | null = 1): Promise<void> {
+export async function waitForAggregatorService(auth: Auth, serviceId: string, expectedBindings: number | null = 0): Promise<void> {
   const timeoutMs = 120_000;
   const pollMs = 500;
   const deadline = Date.now() + timeoutMs;

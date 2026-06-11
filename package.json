@@ -14,8 +14,10 @@
   "license": "ISC",
   "dependencies": {
     "@comunica/query-sparql": "4.4.1",
+    "@incremunica/query-sparql-incremental": "^2.3.5",
     "@inrupt/solid-client-authn-core": "^3.1.0",
     "asynciterator": "^3.10.0",
+    "n3": "^2.0.3",
     "ws": "^8.18.3"
   },
   "devDependencies": {

@@ -23,8 +23,13 @@ export const ActivitySparqlFieldMap: {
       "  OPTIONAL { ?activity_type_iri rdfs:label ?activity_type_label . }\n" +
       "}\n" +
       "OPTIONAL {\n" +
-      "  ?activity a ?legacy_activity_type_class .\n" +
-      "  FILTER(?legacy_activity_type_class != activo:Activity)\n" +
+      "  {" +
+      "    SELECT ?activity ?legacy_activity_type_class" +
+      "    WHERE {" +
+      "      ?activity a ?legacy_activity_type_class ." +
+      "      FILTER(?legacy_activity_type_class != activo:Activity)" +
+      "    }" +
+      "  }" +
       "  OPTIONAL { ?legacy_activity_type_class rdfs:label ?legacy_activity_type_label . }\n" +
       "}",
     requiredVariable: "activity",
@@ -83,7 +88,6 @@ export const ActivitySparqlFieldMap: {
       "  ?activity_hasPowerMeter_stats activo:hasPowerStats ?activity_hasPowerMeter_powerStats .\n" +
       "}",
     requiredVariable: "activity",
-    formatValue: (bindings: Bindings) => bindings.has("activity_hasPowerMeter_powerStats"),
     required: true
   },
   activity_trainer: {
@@ -880,11 +884,20 @@ export const ActivitySparqlFieldMap: {
   // normal stats
   activity_stats: {
     graphPattern:
-      "?activity activo:hasStats ?activity_stats .\n" +
-      "?activity_stats prov:wasGeneratedBy ?activity_stats_computationActivity .\n" +
-      "?activity_stats_computationActivity a activo:StatsComputationActivity .",
+      "{\n" +
+      "  SELECT ?activity ?activity_stats\n" +
+      "  WHERE {\n" +
+      "    ?activity activo:hasStats ?activity_stats .\n" +
+      "\n" +
+      "    FILTER NOT EXISTS {\n" +
+      "      ?activity_stats prov:wasGeneratedBy ?activity_stats_recordingActivity .\n" +
+      "      ?activity_stats_recordingActivity a activo:RecordingActivity .\n" +
+      "    }\n" +
+      "  }\n" +
+      "}",
     requiredVariable: "activity",
-    ignore: true
+    ignore: true,
+    required: true
   },
   activity_stats_distance: {
     graphPattern: "?activity_stats activo:distance ?activity_stats_distance .",
@@ -1565,14 +1578,7 @@ export const ActivitySparqlFieldMap: {
   },
 
   activity_laps: {
-    graphPattern:
-      "{\n" +
-      "  SELECT ?activity (COUNT(?activity_lap) AS ?activity_laps) WHERE {\n" +
-      "    ?activity a activo:Activity .\n" +
-      "    OPTIONAL { ?activity activo:hasLap ?activity_lap . }\n" +
-      "  }\n" +
-      "  GROUP BY ?activity\n" +
-      "}",
+    graphPattern: "SELECT (COUNT(?activity_lap) AS ?activity_laps) WHERE { ?activity activo:hasLap ?activity_lap . }",
     requiredVariable: "activity",
     formatValue: (bindings: Bindings) => {
       if (!bindings.has("activity_laps")) {
@@ -1593,13 +1599,7 @@ export const ActivitySparqlFieldMap: {
   },
   activity_flags: {
     graphPattern:
-      "{\n" +
-      "  SELECT ?activity (COUNT(?activity_flag) AS ?activity_flags) WHERE {\n" +
-      "    ?activity a activo:Activity .\n" +
-      "    OPTIONAL { ?activity activo:hasFlag ?activity_flag . }\n" +
-      "  }\n" +
-      "  GROUP BY ?activity\n" +
-      "}",
+      "SELECT (COUNT(?activity_flag) AS ?activity_flags) WHERE { ?activity activo:hasFlag ?activity_flag . }",
     requiredVariable: "activity",
     formatValue: (bindings: Bindings) => {
       if (!bindings.has("activity_flags")) {
@@ -1635,7 +1635,6 @@ export const ActivitySparqlFieldMap: {
   activity_settingsLack: {
     graphPattern: "",
     requiredVariable: "activity",
-    formatValue: () => false,
     required: true
   },
   activity_creationTime: {
@@ -1690,3 +1689,7 @@ export const ActivitySparqlFieldMap: {
     }
   }
 };
+
+export enum ElevateSport {
+  Other = "Other"
+}

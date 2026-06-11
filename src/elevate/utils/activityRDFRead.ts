@@ -724,7 +724,8 @@ ORDER BY ?lapIndex
         options.auth,
         queryString,
         sources,
-        serviceKey
+        serviceKey,
+        null
       );
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -847,7 +848,8 @@ SELECT ?index WHERE {
         options.auth,
         queryString,
         sources,
-        serviceKey
+        serviceKey,
+        null
       );
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -905,7 +907,8 @@ ORDER BY ?peakDuration
         options.auth,
         queryString,
         sources,
-        serviceKey
+        serviceKey,
+        null
       );
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -974,7 +977,8 @@ SELECT * WHERE {
         options.auth,
         queryString,
         sources,
-        serviceKey
+        serviceKey,
+        null
       );
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -1100,7 +1104,8 @@ ORDER BY ?zoneIndex
         options.auth,
         queryString,
         sources,
-        serviceKey
+        serviceKey,
+        null
       );
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -1228,7 +1233,7 @@ _:Query
     queryString: string,
     sources: string[],
     serviceKey: string,
-    expectedBindings: number | null = 1
+    expectedBindings: number | null = 0
   ): Promise<any> {
     const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey, expectedBindings);
     return await getAggregatorService(auth, serviceId);
