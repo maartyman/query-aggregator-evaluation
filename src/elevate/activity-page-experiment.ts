@@ -13,6 +13,36 @@ import {IndexedStore} from "../utils/indexed-store";
 import {FileCacheFetch} from "../utils/file-cache-fetch";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
+/**
+ * The activity always contains every triple the query requires, so an empty
+ * result set never reflects the generated data. It only happens when the live
+ * HTTP query against a freshly started CSS server hits a transient empty/failed
+ * response, which Comunica surfaces as a stream that ends without any bindings.
+ * Retry a few times before treating it as a genuine failure.
+ */
+async function withResultRetry<T>(
+  fn: () => Promise<T>,
+  { retries = 5, delayMs = 300 }: { retries?: number; delayMs?: number } = {}
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const isTransientEmpty = String(error?.message ?? error).includes("No results received from iterator");
+      if (!isTransientEmpty || attempt === retries) {
+        throw error;
+      }
+      Logger.warn(
+        `Query returned no results (attempt ${attempt + 1}/${retries + 1}); retrying after ${delayMs}ms...`
+      );
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy, authorizationMode = "nondelegated"): Promise<ExperimentResult> {
   const auth = authorizationMode === "no-auth" ? undefined : new Auth(podContext, {enableCache: false});
   await auth?.init();
@@ -28,8 +58,32 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
   const activityDao = new ActivityDao();
 
   if (cache === "indexed-cache") {
-    const store = new IndexedStore();
-    await store.add([activityUrl], resourceFetch);
+    return await withResultRetry(async () => {
+      const store = new IndexedStore();
+      await store.add([activityUrl], resourceFetch);
+
+      const setupHttpMetrics = await getHttpMetricsSnapshot();
+      const startTime = ExperimentResult.startMeasurement();
+
+      const resultIterator = await activityDao.getById(activityIri, {
+        auth,
+        fetch: queryFetch,
+        sources: [store.store] as any
+      });
+
+      return await ExperimentResult.fromIterator(
+        podContext.name + "_" + activityLocation + "_" + cache,
+        startTime,
+        resultIterator,
+        { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      );
+    });
+  }
+
+  return await withResultRetry(async () => {
+    if (cache === "file-cache") {
+      await queryFetch(activityUrl, { headers: { Accept: "text/turtle" } });
+    }
 
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
@@ -37,40 +91,16 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
     const resultIterator = await activityDao.getById(activityIri, {
       auth,
       fetch: queryFetch,
-      sources: [store.store] as any
+      sources: [activityUrl]
     });
 
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + activityLocation + "_" + cache,
       startTime,
       resultIterator,
-      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics }
     );
-  }
-
-  if (cache === "file-cache") {
-    await queryFetch(activityUrl, { headers: { Accept: "text/turtle" } });
-  }
-
-  const setupHttpMetrics = await getHttpMetricsSnapshot();
-  const startTime = ExperimentResult.startMeasurement();
-
-  const runQuery = async () => {
-    return await activityDao.getById(activityIri, {
-      auth,
-      fetch: queryFetch,
-      sources: [activityUrl]
-    });
-  };
-
-  const resultIterator = await runQuery();
-
-  return await ExperimentResult.fromIterator(
-    podContext.name + "_" + activityLocation + "_" + cache,
-    startTime,
-    resultIterator,
-    { setupHttpMetrics }
-  );
+  });
 }
 
 export class ActivityPageExperiment extends ElevateDataGenerator implements Experiment {
