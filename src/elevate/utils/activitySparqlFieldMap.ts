@@ -4,6 +4,7 @@ import { elevateSportForActivityTypeIri } from "./activity-type-ontology-map";
 export const ActivitySparqlFieldMap: {
   [key: string]: {
     graphPattern: string;
+    graphPatternIncremental?: string;
     requiredVariable: string;
     formatValue?: (bindings: Bindings) => any;
     ignore?: boolean;
@@ -884,6 +885,12 @@ export const ActivitySparqlFieldMap: {
   // normal stats
   activity_stats: {
     graphPattern:
+      "?activity activo:hasStats ?activity_stats .\n" +
+      "FILTER NOT EXISTS {\n" +
+      "?activity_stats prov:wasGeneratedBy ?activity_stats_recordingActivity .\n" +
+      "?activity_stats_recordingActivity a activo:RecordingActivity .\n" +
+      "}",
+    graphPatternIncremental:
       "{\n" +
       "  SELECT ?activity ?activity_stats\n" +
       "  WHERE {\n" +

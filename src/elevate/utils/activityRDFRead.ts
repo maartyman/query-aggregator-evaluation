@@ -104,10 +104,15 @@ export class ActivityRDFRead {
       auth?: Auth;
       fetch?: typeof fetch;
       debugQuery?: (query: string) => void;
+      incremental?: boolean;
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     if (!options) {
       options = {};
+    }
+
+    if (options.aggregator?.enabled) {
+      options.incremental = true;
     }
 
     let query = `
@@ -188,7 +193,9 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
         if (!workingNode.children[variable]) {
           // @ts-ignore
           workingNode.children[variable] = {
-            graphPattern: ActivitySparqlFieldMap[variable].graphPattern,
+            graphPattern:
+              (options.incremental && ActivitySparqlFieldMap[variable].graphPatternIncremental) ||
+              ActivitySparqlFieldMap[variable].graphPattern,
             required: ActivitySparqlFieldMap[variable].required,
             children: {}
           };
