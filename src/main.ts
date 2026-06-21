@@ -71,6 +71,7 @@ function getNonNegativeIntegerEnv(name: string, fallback: number): number {
 
 const WARMUP_RUNS = getNonNegativeIntegerEnv("WARMUP_RUNS", 1);
 const RECORDED_RUNS = getNonNegativeIntegerEnv("RECORDED_RUNS", 30);
+const EXPERIMENT_ATTEMPTS = Math.max(1, getNonNegativeIntegerEnv("EXPERIMENT_ATTEMPTS", 5));
 
 function getLoggingOptionsFromEnv(): LoggingOptions | undefined {
   const loggingOptions: LoggingOptions = {};
@@ -226,6 +227,44 @@ async function runExperiment(
   }
 }
 
+async function runExperimentWithRetries(
+  fullExperimentName: string,
+  experimentName: string,
+  experimentConfig: ExperimentConfig,
+  useExistingData: boolean,
+  authorizationMode: AuthorizationMode,
+  loggingOptions?: LoggingOptions
+): Promise<ExperimentResult[]> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= EXPERIMENT_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      console.log(`Retrying ${fullExperimentName}, attempt ${attempt}/${EXPERIMENT_ATTEMPTS}...`);
+    }
+
+    try {
+      return await runExperiment(
+        experimentName,
+        experimentConfig,
+        useExistingData,
+        authorizationMode,
+        loggingOptions
+      );
+    } catch (error) {
+      lastError = error;
+      if (attempt >= EXPERIMENT_ATTEMPTS) {
+        break;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`✗ Attempt ${attempt}/${EXPERIMENT_ATTEMPTS} failed for ${fullExperimentName}: ${message}`);
+      console.log(`Restarting servers and retrying ${fullExperimentName}...\n`);
+    }
+  }
+
+  throw lastError;
+}
+
 async function main() {
   const configPath = path.resolve('./configs/complete-config.json');
 
@@ -267,7 +306,8 @@ async function main() {
       console.log(`Running ${fullExperimentName} (authorizationMode: ${authorizationMode})...`);
 
       try {
-        const results = await runExperiment(
+        const results = await runExperimentWithRetries(
+          fullExperimentName,
           experimentName,
           configWithPods,
           config.useExistingData ?? false,
