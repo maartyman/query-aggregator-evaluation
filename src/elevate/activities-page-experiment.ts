@@ -14,6 +14,8 @@ import {IndexedStore} from "../utils/indexed-store";
 import {FileCacheFetch} from "../utils/file-cache-fetch";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
+const availableServiceRel = "https://w3id.org/aggregator#availableService";
+
 const SelectedColumnsMap: Record<string, {
   keys: string[],
   filterKeys: ({ key: string; relationKeyToValue: string; value: string | number | Date | boolean } | { requiredKeys: string[]; condition: string })[],
@@ -231,9 +233,46 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     });
 
     await this.registerScenarioServiceDescriptions(auth, activityDao, podContext, activitySources);
+    await this.waitForDiscoveryLinks(auth, activitySources);
 
     // Mark as initialized for this pod/query combination
     this.aggregatorIdStore.set(cacheKey, 'initialized');
+  }
+
+  private async waitForDiscoveryLinks(auth: Auth, sources: string[]): Promise<void> {
+    const timeoutMs = 30_000;
+    const pollMs = 500;
+    const deadline = Date.now() + timeoutMs;
+    let missingSources = sources;
+
+    while (Date.now() < deadline) {
+      missingSources = [];
+      for (const source of sources) {
+        const response = await auth.fetch(source, { method: "HEAD" });
+        if (!response.ok || !this.hasAvailableServiceLink(response.headers)) {
+          missingSources.push(source);
+        }
+      }
+
+      if (missingSources.length === 0) {
+        return;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+    }
+
+    throw new Error(`Timed out waiting for aggregator discovery links on sources: ${missingSources.join(", ")}`);
+  }
+
+  private hasAvailableServiceLink(headers: Headers): boolean {
+    const linkHeader = headers.get("Link");
+    if (!linkHeader) {
+      return false;
+    }
+    return linkHeader.split(",").some(link =>
+      link.includes(`rel="${availableServiceRel}"`) ||
+      link.includes(`rel=${availableServiceRel}`)
+    );
   }
 
   private async registerScenarioServiceDescriptions(

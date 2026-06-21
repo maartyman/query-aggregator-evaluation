@@ -132,7 +132,6 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
     }
 
     let completeActivity = false;
-    let needsFlags = false;
     if (!options.keys || options.keys.length === 0) {
       options.keys = Object.keys(ActivitySparqlFieldMap);
       completeActivity = true;
@@ -158,10 +157,6 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
       }
       keysSet.delete("activity");
       keysSet.delete("activity_id");
-      if (keysSet.has("activity_flags")) {
-        needsFlags = true;
-        keysSet.delete("activity_flags");
-      }
       options.keys = Array.from(keysSet);
     }
 
@@ -360,7 +355,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
           }
         }
 
-        if (completeActivity || needsFlags) {
+        if (completeActivity) {
           activity.flags = await this.queryFlags(activityIri!, sources, options);
         }
 
@@ -432,7 +427,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
             }
 
             const promises = [];
-            if (completeActivity || needsFlags) {
+            if (completeActivity) {
               promises.push(
                 this.queryFlags(bindings.get("activity")!.value, sources, options).then(result => {
                   activity.flags = result;
@@ -1222,11 +1217,16 @@ _:Query
   ): Promise<string> {
     const store = getAggregatorIdStore();
     let serviceId = store.get(serviceKey);
+    if (serviceId) {
+      return serviceId;
+    }
 
+    const descriptionServiceKey = `${serviceKey}:description`;
+    serviceId = store.get(descriptionServiceKey);
     if (!serviceId) {
       const fnoConfig = this.buildFnoConfig(queryString, sources);
       serviceId = await registerAggregatorServiceDescription(auth, fnoConfig);
-      store.set(serviceKey, serviceId);
+      store.set(descriptionServiceKey, serviceId);
     }
 
     return serviceId;

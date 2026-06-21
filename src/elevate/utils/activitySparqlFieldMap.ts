@@ -1606,13 +1606,36 @@ export const ActivitySparqlFieldMap: {
   },
   activity_flags: {
     graphPattern:
-      "SELECT (COUNT(?activity_flag) AS ?activity_flags) WHERE { ?activity activo:hasFlag ?activity_flag . }",
+      "OPTIONAL {\n" +
+      "  {\n" +
+      "    SELECT ?activity (GROUP_CONCAT(STR(?index); separator=\",\") AS ?activity_flags) WHERE {\n" +
+      "      ?activity activo:hasFlag ?flag .\n" +
+      "      VALUES (?flag ?index) {\n" +
+      "        (activo:MOVING_TIME_GREATER_THAN_ELAPSED 0)\n" +
+      "        (activo:SPEED_AVG_ABNORMAL 1)\n" +
+      "        (activo:SPEED_STD_DEV_ABNORMAL 2)\n" +
+      "        (activo:ASCENT_SPEED_ABNORMAL 3)\n" +
+      "        (activo:PACE_AVG_FASTER_THAN_GAP 4)\n" +
+      "        (activo:POWER_AVG_KG_ABNORMAL 5)\n" +
+      "        (activo:POWER_THRESHOLD_ABNORMAL 6)\n" +
+      "        (activo:HR_AVG_ABNORMAL 7)\n" +
+      "        (activo:SCORE_HRSS_PER_HOUR_ABNORMAL 8)\n" +
+      "        (activo:SCORE_PSS_PER_HOUR_ABNORMAL 9)\n" +
+      "        (activo:SCORE_RSS_PER_HOUR_ABNORMAL 10)\n" +
+      "        (activo:SCORE_SSS_PER_HOUR_ABNORMAL 11)\n" +
+      "      }\n" +
+      "    } GROUP BY ?activity\n" +
+      "  }\n" +
+      "}",
     requiredVariable: "activity",
     formatValue: (bindings: Bindings) => {
       if (!bindings.has("activity_flags")) {
-        return null;
+        return [];
       }
-      return [];
+      return bindings.get("activity_flags")!.value
+        .split(",")
+        .filter(value => value !== "")
+        .map(value => parseInt(value, 10));
     }
   },
 

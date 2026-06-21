@@ -1,0 +1,20 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/ucp/^0.0.0/components/context.jsonld"
+  ],
+  "import": [
+    "sai-uma:config/default.json"
+  ],
+  "@graph": [
+    {
+      "comment": "Benchmark-only public authorization: every registered resource is treated as public, so permission requests return no ticket.",
+      "@id": "urn:uma:no-auth:Authorizer",
+      "@type": "Override",
+      "overrideInstance": { "@id": "urn:uma:default:Authorizer" },
+      "overrideParameters": {
+        "@type": "AllAuthorizer"
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld"
+  ],
+  "import": [
+    "sai-uma:config/default.json"
+  ],
+  "@graph": [
+    {
+      "comment": "Benchmark non-delegated authorization: resolve permissions directly from the authorizer.",
+      "@id": "urn:uma:nondelegated:TicketingStrategy",
+      "@type": "Override",
+      "overrideInstance": { "@id": "urn:uma:default:TicketingStrategy" },
+      "overrideParameters": {
+        "@type": "ImmediateAuthorizerStrategy",
+        "authorizer": { "@id": "urn:uma:default:Authorizer" }
+      }
+    }
+  ]
+}

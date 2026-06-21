@@ -1,0 +1,36 @@
+# The server is currently configured to use localhost as its base URL.
+# When using multiple docker containers that want to interact with each other, 0.0.0.0 should be used.
+# Because of this, and also because of potential external interactions with the server,
+# it might be necessary in the future to add changes to support this.
+# Newer versions of CSS can be configured to allow multiple base URLs which will be necessary then.
+
+services:
+  css1:
+    image: css:latest
+    build:
+      context: .
+      dockerfile: ./packages/css/Dockerfile
+    environment:
+      PORT: 3000
+      UMA_BASE: http://uma1:4000/uma
+      DATA_DIR: /data
+      LOG_LEVEL: error
+    volumes:
+      - ./zipdata/3000:/data
+    depends_on:
+      - uma1
+    ports:
+      - "3000:3000"
+
+  uma1:
+    image: uma:latest
+    build:
+      context: .
+      dockerfile: ./packages/uma/Dockerfile
+    environment:
+      PORT: 4000
+      BASE_URL: http://uma1:4000/uma
+      POLICY_BASE: http://css1:3000/
+      LOG_LEVEL: error
+    ports:
+      - "4000:4000"

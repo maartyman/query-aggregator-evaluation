@@ -1,0 +1,36 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^7.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma-css/^0.0.0/components/context.jsonld"
+  ],
+  "@graph": [
+    {
+      "comment": "Caches permissions based on credentials and requested modes. Does not cache the input object itself as that object might be created in different places",
+      "@id": "urn:solid-server:default:PermissionReader",
+      "@type": "CachedHandler",
+      "fields": [
+        "credentials",
+        "requestedModes"
+      ],
+      "source": {
+        "@id": "urn:uma:default:UnionPermissionReader",
+        "@type": "UnionPermissionReader",
+        "readers": [
+          {
+            "comment": "This PermissionReader will be used to prevent external access to containers used for internal storage.",
+            "@id": "urn:solid-server:default:PathBasedReader",
+            "@type": "PathBasedReader",
+            "baseUrl": {
+              "@id": "urn:solid-server:default:variable:baseUrl"
+            }
+          },
+          {
+            "comment": "The main reader, checks permissions from UMA token.",
+            "@id": "urn:solid-server:default:UmaPermissionReader",
+            "@type": "UmaPermissionReader"
+          }
+        ]
+      }
+    }
+  ]
+}

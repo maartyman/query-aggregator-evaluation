@@ -1,0 +1,29 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^7.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma-css/^0.0.0/components/context.jsonld"
+  ],
+  "@graph": [
+    {
+      "comment": "Shared in-memory aggregator discovery registry.",
+      "@id": "urn:solid-server:default:AggregatorDiscoveryStore",
+      "@type": "AggregatorDiscoveryStore"
+    },
+    {
+      "comment": "Advertise registered aggregator services through Link headers.",
+      "@id": "urn:solid-server:override:MetadataWriter_AggregatorDiscovery",
+      "@type": "Override",
+      "overrideInstance": { "@id": "urn:solid-server:default:MetadataWriter" },
+      "overrideSteps": [{
+        "@type": "OverrideListInsertAt",
+        "overrideParameter": { "@id": "ParallelHandler:_handlers" },
+        "overrideTarget": 0,
+        "overrideValue": {
+          "@id": "urn:solid-server:default:AggregatorDiscoveryMetadataWriter",
+          "@type": "AggregatorDiscoveryMetadataWriter",
+          "store": { "@id": "urn:solid-server:default:AggregatorDiscoveryStore" }
+        }
+      }]
+    }
+  ]
+}

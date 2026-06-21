@@ -1,0 +1,151 @@
+{
+  "name": "@solidlab/user-managed-access",
+  "version": "0.1.0",
+  "description": "SolidLab access & usage control artefacts for use in the Solid ecosystem.",
+  "keywords": [
+    "css",
+    "solid",
+    "community solid server",
+    "solid community server",
+    "uma",
+    "user managed access",
+    "access control",
+    "usage control",
+    "authorization",
+    "policies",
+    "grants"
+  ],
+  "author": {
+    "name": "Wouter Termont",
+    "email": "wouter.termont@ugent.be",
+    "url": "https://wouter.termont.online/"
+  },
+  "license": "MIT",
+  "repository": "github:SolidLabResearch/user-managed-access",
+  "homepage": "https://github.com/SolidLabResearch/user-managed-access/README.md",
+  "bugs": "https://github.com/SolidLabResearch/user-managed-access/issues",
+  "contributors": [
+    {
+      "name": "Ruben Dedecker",
+      "email": "ruben.dedecker@ugent.be",
+      "url": "https://pod.rubendedecker.be/profile/card#me"
+    },
+    {
+      "name": "Wout Slabbink",
+      "email": "wout.slabbink@ugent.be",
+      "url": "https://pod.woutslabbinck.com/profile/card#me"
+    },
+    {
+      "name": "Wouter Termont",
+      "email": "wouter.termont@ugent.be",
+      "url": "https://wouter.termont.online/"
+    }
+  ],
+  "private": true,
+  "packageManager": "yarn@4.9.2",
+  "engines": {
+    "node": ">=20.0",
+    "yarn": ">=4.0"
+  },
+  "type": "commonjs",
+  "exports": {},
+  "files": [],
+  "scripts": {
+    "postinstall": "yarn run sync:list && yarn build",
+    "clean": "shx rm -rf ./**/node_modules",
+    "build": "yarn workspaces foreach --include 'packages/*' -A -pi -j unlimited -t run build",
+    "test": "vitest run",
+    "start": "yarn workspaces foreach --include 'packages/*' -A -pi -j unlimited run start",
+    "start:odrl": "yarn workspace @solidlab/uma run start:odrl & yarn workspace @solidlab/uma-css run start",
+    "start:demo": "yarn workspaces foreach --include 'packages/*' -A -pi -j unlimited run demo",
+    "script:demo": "yarn exec tsx ./demo/flow.ts",
+    "script:demo-test": "yarn exec tsx ./demo/flow-test.ts",
+    "script:public": "yarn exec tsx ./scripts/test-public.ts",
+    "script:private": "yarn exec tsx ./scripts/test-private.ts",
+    "script:collection": "yarn exec tsx ./scripts/test-collection.ts",
+    "script:uma-ucp": "yarn exec tsx ./scripts/test-uma-ucp.ts",
+    "script:uma-odrl": "yarn exec tsx ./scripts/test-uma-ODRL.ts",
+    "script:flow": "yarn run script:public && yarn run script:private && yarn run script:collection && yarn run script:uma-ucp",
+    "sync:list": "syncpack list-mismatches",
+    "sync:fix": "syncpack fix-mismatches"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^16.1.0",
+    "@commitlint/config-conventional": "^16.0.0",
+    "@types/node": "^20.19.1",
+    "@typescript-eslint/eslint-plugin": "^5.12.1",
+    "@typescript-eslint/parser": "^5.12.1",
+    "@vitest/coverage-v8": "^3.2.4",
+    "chalk": "^5.4.1",
+    "componentsjs-generator": "^3.1.2",
+    "eslint": "^8.10.0",
+    "jest-rdf": "^1.8.1",
+    "shx": "^0.3.4",
+    "syncpack": "^13.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.3"
+  },
+  "resolutions": {
+    "@types/node": "^20.19.1"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "eslintConfig": {
+    "env": {
+      "browser": true,
+      "es2021": true
+    },
+    "extends": [],
+    "parser": "@typescript-eslint/parser",
+    "parserOptions": {
+      "ecmaVersion": "latest",
+      "sourceType": "module"
+    },
+    "plugins": [
+      "@typescript-eslint"
+    ],
+    "rules": {
+      "max-len": [
+        2,
+        {
+          "code": 120,
+          "tabWidth": 4,
+          "ignoreUrls": true
+        }
+      ],
+      "new-cap": "off"
+    },
+    "ignorePatterns": [
+      "node_modules",
+      "dist",
+      "scripts",
+      "coverage",
+      "*.conf.js",
+      "*.config.js",
+      "*.conf.ts",
+      "*.config.ts"
+    ]
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ],
+    "rules": {
+      "type-enum": [
+        2,
+        "always",
+        [
+          "feat",
+          "fix",
+          "docs",
+          "chore",
+          "build",
+          "test"
+        ]
+      ]
+    }
+  }
+}

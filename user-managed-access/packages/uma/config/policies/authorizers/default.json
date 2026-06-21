@@ -1,0 +1,41 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/ucp/^0.0.0/components/context.jsonld"
+  ],
+  "@graph": [
+    {
+      "@id": "urn:uma:default:Authorizer",
+      "@type": "DerivedFromAuthorizer",
+      "resourceStore": { "@id": "urn:uma:default:ResourceRegistrationStore" },
+      "authorizer": {
+        "@id": "urn:uma:default:NamespacedAuthorizer",
+        "@type": "NamespacedAuthorizer",
+        "resourceStore": { "@id": "urn:uma:default:ResourceRegistrationStore" },
+        "authorizers": [
+          {
+            "NamespacedAuthorizer:_authorizers_key": "profile",
+            "NamespacedAuthorizer:_authorizers_value": {
+              "@id": "urn:uma:default:AllAuthorizer",
+              "@type": "AllAuthorizer"
+            }
+          }
+        ],
+        "fallback": {
+          "@id": "urn:uma:default:AllWebIdAuthorizer",
+          "@type": "AllWebIdAuthorizer"
+        }
+      }
+    },
+    {
+      "@id": "urn:uma:default:RulesStorage",
+      "@type": "DirectoryUCRulesStorage",
+      "directoryPath": {
+        "@id": "urn:uma:variables:policyDir"
+      },
+      "baseIRI": {
+        "@id": "urn:uma:variables:policyBaseIRI"
+      }
+    }
+  ]
+}

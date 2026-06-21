@@ -1,0 +1,17 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld"
+  ],
+  "@graph": [
+    {
+      "@id": "urn:uma:default:IntrospectionRoute",
+      "@type": "HttpHandlerRoute",
+      "methods": [ "POST" ],
+      "handler": {
+        "@type": "IntrospectionHandler",
+        "tokenFactory": { "@id": "urn:uma:default:TokenFactory" }
+      },
+      "path": "/uma/introspect"
+    }
+  ]
+}
