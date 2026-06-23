@@ -1,23 +1,20 @@
 # Result Analysis
 
-This folder contains lightweight tooling for checking and plotting experiment result JSON files.
+This folder contains the Dash app for inspecting experiment result JSON files.
 
-Open and run:
+Install the Python analysis dependencies:
 
-`analysis/analyze-results.ipynb`
+`python3 -m pip install -r analysis/requirements-analysis.txt`
 
-Outputs:
+Run Plotly Dash:
 
-- `summary.csv`: one row per result file with timing, result count, HTTP metrics, and parameters.
-- `aggregates.csv`: grouped median/average duration and result counts.
-- `validation.json`: machine-readable consistency checks.
-- `validation.md`: human-readable validation report.
-- `plots/*.svg`: median duration bar charts grouped by experiment and authorization mode.
-- `line-plots/*.svg`: median duration line charts split by experiment and authorization mode, with the iteration dimension on the x axis and execution variants as lines.
+`python3 analysis/dash_app.py`
 
-To generate the line plots from an existing `summary.csv`:
+Then open `http://127.0.0.1:8050`.
 
-`python3 analysis/plot-iteration-lines.py`
+Shared data loading for the app lives in:
+
+`analysis/results_data.py`
 
 Validation checks:
 
