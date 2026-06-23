@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { combineHttpMetrics, getHttpMetricsSnapshot, resetHttpMetrics } from './http-metrics';
+import { getHttpMetricsSnapshot, resetHttpMetrics, type HttpMetricsSnapshot } from './http-metrics';
 
 export class ExperimentResult {
   public experimentId: string;
@@ -103,7 +103,7 @@ export class ExperimentResult {
 
         getHttpMetricsSnapshot().then(metrics => {
           const { setupHttpMetrics, ...cleanParameters } = parameters ?? {};
-          const combinedMetrics = setupHttpMetrics ? combineHttpMetrics(setupHttpMetrics, metrics) : metrics;
+          const setupMetrics = setupHttpMetrics as HttpMetricsSnapshot | undefined;
           resolve(new ExperimentResult(
           experimentId,
           totalDuration,
@@ -113,7 +113,8 @@ export class ExperimentResult {
           timestamps,
           timestamps.length,
           {
-            ...combinedMetrics,
+            ...metrics,
+            ...ExperimentResult.setupMetricsParameters(metrics, setupMetrics),
             queryResultCount: timestamps.length,
             ...cleanParameters
           }
@@ -151,7 +152,7 @@ export class ExperimentResult {
 
     const metrics = await getHttpMetricsSnapshot();
     const { setupHttpMetrics, ...cleanParameters } = parameters ?? {};
-    const combinedMetrics = setupHttpMetrics ? combineHttpMetrics(setupHttpMetrics, metrics) : metrics;
+    const setupMetrics = setupHttpMetrics as HttpMetricsSnapshot | undefined;
 
     return new ExperimentResult(
       experimentId,
@@ -162,7 +163,8 @@ export class ExperimentResult {
       timestamps,
       timestamps.length,
       {
-        ...combinedMetrics,
+        ...metrics,
+        ...ExperimentResult.setupMetricsParameters(metrics, setupMetrics),
         queryResultCount: timestamps.length,
         ...cleanParameters
       }
@@ -172,6 +174,28 @@ export class ExperimentResult {
   public static startMeasurement(): [number, number] {
     resetHttpMetrics();
     return process.hrtime();
+  }
+
+  private static setupMetricsParameters(
+    metrics: HttpMetricsSnapshot,
+    setupMetrics?: HttpMetricsSnapshot
+  ): Record<string, number> {
+    if (!setupMetrics) {
+      return {};
+    }
+
+    return {
+      setupHttpRequests: setupMetrics.totalHttpRequests,
+      setupHTTPRequests: setupMetrics.totalHTTPRequests,
+      setupResourceRequests: setupMetrics.resourceRequests,
+      setupAuthorizationTokenRequests: setupMetrics.authorizationTokenRequests,
+      setupNumberOfTriples: setupMetrics.numberOfTriples,
+      overallHttpRequests: setupMetrics.totalHttpRequests + metrics.totalHttpRequests,
+      overallHTTPRequests: setupMetrics.totalHTTPRequests + metrics.totalHTTPRequests,
+      overallResourceRequests: setupMetrics.resourceRequests + metrics.resourceRequests,
+      overallAuthorizationTokenRequests: setupMetrics.authorizationTokenRequests + metrics.authorizationTokenRequests,
+      overallNumberOfTriples: setupMetrics.numberOfTriples + metrics.numberOfTriples,
+    };
   }
 
   private static calculateDiefficiency(timestamps: [number,number][], timeMs: [number,number]): number {

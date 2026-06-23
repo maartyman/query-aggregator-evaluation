@@ -103,41 +103,44 @@ async function runQueriesInWorker(
 
   if (cache === "indexed-cache") {
     const store = new IndexedStore();
-    await store.add([`${podContext.baseUrl}/watchparties/myMessages/`], resourceFetch);
+    const messageContainer = `${podContext.baseUrl}/watchparties/myMessages/`;
+    await store.add([messageContainer], resourceFetch);
 
-    const messageLocations = await (await engine.queryBindings(queryMessageLocations, {
-      sources: [ store.store ],
+    const rawMessageLocations = await (await engine.queryBindings(queryMessageLocations, {
+      sources: [ store.get(messageContainer) ],
     }))
       .map((bindings) => bindings.get('messageLocations')!.value)
-      .toArray()
+      .toArray();
+    const messageLocations = [...new Set(rawMessageLocations)];
     await store.add(messageLocations, resourceFetch);
 
-    const roomLocations = await (await engine.queryBindings(queryMessageBoxes, {
-      sources: [ store.store ],
+    const rawRoomLocations = await (await engine.queryBindings(queryMessageBoxes, {
+      sources: store.getMany(messageLocations),
     }))
       .map((bindings) => bindings.get('roomUrl')!.value)
-      .toArray()
+      .toArray();
+    const roomLocations = [...new Set(rawRoomLocations)];
     await store.add(roomLocations, resourceFetch);
 
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryMessageLocations, {
-      sources: [ store.store ],
+      sources: [ store.get(messageContainer) ],
     }))
       .toArray()
     await (await engine.queryBindings(queryMessageBoxes, {
-      sources: [ store.store ],
+      sources: store.getMany(messageLocations),
     }))
       .toArray()
     const resultIterator: AsyncIterator<any> = await engine.queryBindings(queryRooms, {
-      sources: [ store.store ],
+      sources: store.getMany(roomLocations),
     });
 
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + cache,
       startTime,
       resultIterator,
-      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.countQuads() }
     );
   }
 

@@ -117,11 +117,11 @@ async function runQueriesInWorker(
     const startTime = ExperimentResult.startMeasurement();
 
     await activityDao.count({
-      sources: [store.store] as any
+      sources: store.getMany(activitySources) as any
     });
 
     const resultIterator = await activityDao.find({
-      sources: [store.store] as any,
+      sources: store.getMany(activitySources) as any,
       keys: columnConfig.keys,
       filterKeys: columnConfig.filterKeys,
       ...(columnConfig.sort && { sort: columnConfig.sort })
@@ -131,7 +131,7 @@ async function runQueriesInWorker(
       podContext.name + "_" + selectedColumns + "_" + cache,
       startTime,
       resultIterator,
-      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.countQuads() }
     );
   }
 

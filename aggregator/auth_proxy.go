@@ -44,6 +44,22 @@ type Stream struct {
 }
 
 var AuthProxyInstance *AuthProxy
+var backendTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 90 * time.Second}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	DisableCompression:    true,
+}
+var serviceTargetCache sync.Map
+var clusterNodeIPCache = struct {
+	sync.RWMutex
+	value string
+}{}
 
 // NewAuthProxy creates a new auth proxy instancetype
 func InitAuthProxy(mux *http.ServeMux, baseURL string) {
@@ -173,10 +189,13 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 
 // handleRegularRequest handles non-streaming requests with auth headers
 func (ap *AuthProxy) handleRegularRequest(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	if !auth.AuthorizeRequest(w, r, nil) {
 		return
 	}
+	authDuration := time.Since(start)
 
+	resolveStart := time.Now()
 	actorID, relPath, err := extractActorAndPath(r.URL.Path)
 	if err != nil {
 		ap.writeStreamError(w, err)
@@ -188,6 +207,13 @@ func (ap *AuthProxy) handleRegularRequest(w http.ResponseWriter, r *http.Request
 		ap.writeStreamError(w, err)
 		return
 	}
+	resolveDuration := time.Since(resolveStart)
+
+	w.Header().Add("Server-Timing", fmt.Sprintf(
+		"aggregator_auth;dur=%.3f, aggregator_resolve;dur=%.3f",
+		float64(authDuration.Microseconds())/1000,
+		float64(resolveDuration.Microseconds())/1000,
+	))
 
 	if err := ap.proxyToBackend(w, r, registration, relPath, false); err != nil {
 		logrus.WithError(err).WithFields(logrus.Fields{
@@ -561,6 +587,7 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 }
 
 func (ap *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, registration *ResourceRegistration, relPath string, addServiceLink bool) error {
+	targetStart := time.Now()
 	// Compute preferred target via Kubernetes NodePort service when possible
 	actorID, _, err := extractActorAndPath(r.URL.Path)
 	if err != nil {
@@ -574,20 +601,16 @@ func (ap *AuthProxy) proxyToBackend(w http.ResponseWriter, r *http.Request, regi
 		// Fallback to registration PodIP/port (with loopback rewrite)
 		targetHost = resolveTargetHost(registration.PodIP, registration.Port)
 	}
+	targetDuration := time.Since(targetStart)
+	w.Header().Add("Server-Timing", fmt.Sprintf(
+		"aggregator_target;dur=%.3f",
+		float64(targetDuration.Microseconds())/1000,
+	))
 
 	targetURL := &url.URL{Scheme: "http", Host: targetHost}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.FlushInterval = 250 * time.Millisecond
-	proxy.Transport = &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 90 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    true,
-	}
+	proxy.Transport = backendTransport
 	serviceLink := fmt.Sprintf("<%s>; rel=\"service-token-endpoint\"", ap.endpointUrl)
 	proxy.ModifyResponse = func(res *http.Response) error {
 		if addServiceLink {
@@ -732,6 +755,10 @@ func resolveServiceTarget(actorID string) string {
 	if id == "" {
 		return ""
 	}
+	if cached, ok := serviceTargetCache.Load(id); ok {
+		return cached.(string)
+	}
+
 	serviceName := "id-" + id + "-service"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -755,10 +782,19 @@ func resolveServiceTarget(actorID string) string {
 	if nodeIP == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s:%d", nodeIP, nodePort)
+	target := fmt.Sprintf("%s:%d", nodeIP, nodePort)
+	serviceTargetCache.Store(id, target)
+	return target
 }
 
 func getClusterNodeIP(ctx context.Context) string {
+	clusterNodeIPCache.RLock()
+	cached := clusterNodeIPCache.value
+	clusterNodeIPCache.RUnlock()
+	if cached != "" {
+		return cached
+	}
+
 	nodes, err := Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil || nodes == nil || len(nodes.Items) == 0 {
 		return ""
@@ -767,6 +803,9 @@ func getClusterNodeIP(ctx context.Context) string {
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == "ExternalIP" {
 				if strings.TrimSpace(addr.Address) != "" {
+					clusterNodeIPCache.Lock()
+					clusterNodeIPCache.value = addr.Address
+					clusterNodeIPCache.Unlock()
 					return addr.Address
 				}
 			}
@@ -776,6 +815,9 @@ func getClusterNodeIP(ctx context.Context) string {
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == "InternalIP" {
 				if strings.TrimSpace(addr.Address) != "" {
+					clusterNodeIPCache.Lock()
+					clusterNodeIPCache.value = addr.Address
+					clusterNodeIPCache.Unlock()
 					return addr.Address
 				}
 			}

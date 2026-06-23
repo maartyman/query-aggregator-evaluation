@@ -100,35 +100,37 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
     const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
     await store.add([roomIri], resourceFetch);
 
-    const messageBoxLocations = await (await engine.queryBindings(queryRoom, {
-      sources: [ store.store ],
-    })).map((bindings) => bindings.get('messageBoxUrl')!.value).toArray()
+    const rawMessageBoxLocations = await (await engine.queryBindings(queryRoom, {
+      sources: [ store.get(roomIri) ],
+    })).map((bindings) => bindings.get('messageBoxUrl')!.value).toArray();
+    const messageBoxLocations = [...new Set(rawMessageBoxLocations)];
     await store.add(messageBoxLocations, resourceFetch);
 
-    const creatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
-      sources: [ store.store ],
-    })).map((bindings) => bindings.get('creator')!.value).toArray()
+    const rawCreatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
+      sources: store.getMany(messageBoxLocations),
+    })).map((bindings) => bindings.get('creator')!.value).toArray();
+    const creatorLocations = [...new Set(rawCreatorLocations)];
     await store.add(creatorLocations, resourceFetch);
 
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryRoom, {
-      sources: [ store.store ],
+      sources: [ store.get(roomIri) ],
     }))
       .toArray();
     await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
-      sources: [ store.store ],
+      sources: store.getMany(messageBoxLocations),
     }))
       .toArray();
     const resultIterator = await engine.queryBindings(queryPerson, {
-      sources: [ store.store ],
+      sources: store.getMany(creatorLocations),
     })
 
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + cache,
       startTime,
       resultIterator,
-      { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+      { setupHttpMetrics, numberOfTriples: store.countQuads() }
     );
   }
 

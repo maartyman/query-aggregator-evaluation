@@ -45,16 +45,17 @@ export class DerivedFromAuthorizer implements Authorizer {
           ? relations['prov:wasDerivedFrom'] as {issuer: string, derivation_resource_id: string}[]
           : [relations['prov:wasDerivedFrom'] as {issuer: string, derivation_resource_id: string}];
         this.logger.info(`Resource '${resourceId}' has ${upstream.length} upstream derivation relation(s).`);
-        for (const {issuer, derivation_resource_id } of upstream) {
-          this.logger.debug(`Adding upstream requirement`);
-          this.logger.debug(` issuer='${issuer}', derivation_resource_id='${derivation_resource_id}'.`);
-          otherRequirements[i][UPSTREAMPERMISSION] =
-            (
-              async (upstreamPermission: { issuer: string, derivation_resource_id: string }) =>
-                upstreamPermission.issuer === issuer &&
-                upstreamPermission.derivation_resource_id === derivation_resource_id
-            )
-        }
+        const remaining = new Set(upstream.map(({ issuer, derivation_resource_id }) =>
+          `${issuer}|${derivation_resource_id}`
+        ));
+        otherRequirements[i][UPSTREAMPERMISSION] =
+          async (upstreamPermission: { issuer: string, derivation_resource_id: string }) => {
+            const key = `${upstreamPermission.issuer}|${upstreamPermission.derivation_resource_id}`;
+            if (remaining.has(key)) {
+              remaining.delete(key);
+            }
+            return remaining.size === 0;
+          };
       } else {
         this.logger.debug(`No upstream derivation found for resource '${resourceId}'.`);
       }

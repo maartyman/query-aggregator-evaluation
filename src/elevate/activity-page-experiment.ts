@@ -68,14 +68,14 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
       const resultIterator = await activityDao.getById(activityIri, {
         auth,
         fetch: queryFetch,
-        sources: [store.store] as any
+        sources: [store.get(activityUrl)] as any
       });
 
       return await ExperimentResult.fromIterator(
         podContext.name + "_" + activityLocation + "_" + cache,
         startTime,
         resultIterator,
-        { setupHttpMetrics, numberOfTriples: store.store.getQuads(null, null, null, null).length }
+        { setupHttpMetrics, numberOfTriples: store.countQuads() }
       );
     });
   }
@@ -246,6 +246,14 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, false);
+  }
+
+  async runAggregatorDiscovered(iterations: number): Promise<ExperimentResult[]> {
+    return this.runAggregatorMode(iterations, true);
+  }
+
+  private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
 
     for (let iteration = 0; iteration < iterations; iteration++) {
@@ -258,7 +266,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
           for (const cache of ["no-cache"]) {
-            Logger.info(`Running aggregator experiment for pod ${this.podContext.name}, iteration ${iteration + 1}/${iterations}`);
+            Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocation);
 
             const auth = new Auth(this.podContext, {enableCache: false});
@@ -277,6 +285,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
                 enabled: true,
                 podContext: this.podContext,
                 enableCache: false,
+                discover,
                 expectedBindings: 1
               },
               auth
@@ -302,7 +311,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             };
 
             const aggregatorResult = await ExperimentResult.fromJson(
-              this.podContext.name + "_" + activityLocation + "_aggregator",
+              this.podContext.name + "_" + activityLocation + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
               aggregatorResultJson,
               { setupHttpMetrics }

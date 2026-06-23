@@ -11,7 +11,20 @@ import {
   type HttpRequestKind
 } from './http-metrics';
 
+export interface ObservedHttpRequest {
+  url: string;
+  method: string;
+  kind: HttpRequestKind;
+  startedAtEpochMs: number;
+  durationMs: number;
+  status?: number;
+  ok?: boolean;
+  serverTiming?: string | null;
+  error?: string;
+}
+
 let saveCacheLock: Promise<void> = Promise.resolve();
+let requestObserver: ((request: ObservedHttpRequest) => void) | undefined;
 
 export class Auth {
   private readonly podContext: PodContext;
@@ -35,6 +48,10 @@ export class Auth {
     this.cacheEnabled = options?.enableCache ?? false;
     this.cacheFilePath = options?.cacheFilePath ?? path.join(process.cwd(), '.cache');
     Logger.debug('Initialized Auth with cache:', this.cacheEnabled, 'cacheFilePath:', this.cacheFilePath);
+  }
+
+  public static setRequestObserver(observer?: (request: ObservedHttpRequest) => void): void {
+    requestObserver = observer;
   }
 
   public static async resetCache(cacheFilePath: string = '.cache'): Promise<void> {
@@ -246,12 +263,18 @@ export class Auth {
     for (const requiredClaim of requiredClaims) {
       switch (requiredClaim['claim_token_format']) {
         case 'urn:ietf:params:oauth:token-type:access_token':
-          const tokenEndpoint = requiredClaim.details.issuer + '/token';
+          const issuer = requiredClaim.issuer ?? requiredClaim.details?.issuer;
+          const resourceId = requiredClaim.derivation_resource_id ?? requiredClaim.details?.resource_id;
+          const resourceScopes = requiredClaim.resource_scopes ?? requiredClaim.details?.resource_scopes;
+          if (!issuer || !resourceId || !resourceScopes) {
+            throw new Error(`Invalid access-token claim requirement: ${JSON.stringify(requiredClaim)}`);
+          }
+          const tokenEndpoint = issuer.replace(/\/$/, '') + '/token';
           const { token, error } = await this.fetchAccessToken(
             tokenEndpoint,
             [{
-              resource_id: requiredClaim.details.resource_id,
-              resource_scopes: requiredClaim.details.resource_scopes
+              resource_id: resourceId,
+              resource_scopes: resourceScopes
             }]
           );
           if (error) throw error;
@@ -333,11 +356,18 @@ export class Auth {
     await this.acquireRequestSlot();
     const requestKind = classifyHttpRequest(input);
     const method = init?.method || 'GET';
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     recordHttpRequest(requestKind);
+    const started = process.hrtime.bigint();
+    const startedAtEpochMs = Date.now();
     try {
       const response = await fetch(input, init);
-      trackResponseTriples(response, requestKind, method, typeof input === 'string' ? input : input.toString());
+      Auth.observeRequest(url, method, requestKind, started, startedAtEpochMs, response);
+      trackResponseTriples(response, requestKind, method, url);
       return response;
+    } catch (error) {
+      Auth.observeRequest(url, method, requestKind, started, startedAtEpochMs, undefined, error);
+      throw error;
     } finally {
       this.releaseRequestSlot();
     }
@@ -350,10 +380,45 @@ export class Auth {
   ): Promise<Response> {
     const kind = requestKind ?? classifyHttpRequest(input);
     const method = init?.method || 'GET';
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     recordHttpRequest(kind);
-    const response = await fetch(input, init);
-    trackResponseTriples(response, kind, method, typeof input === 'string' ? input : input.toString());
-    return response;
+    const started = process.hrtime.bigint();
+    const startedAtEpochMs = Date.now();
+    try {
+      const response = await fetch(input, init);
+      Auth.observeRequest(url, method, kind, started, startedAtEpochMs, response);
+      trackResponseTriples(response, kind, method, url);
+      return response;
+    } catch (error) {
+      Auth.observeRequest(url, method, kind, started, startedAtEpochMs, undefined, error);
+      throw error;
+    }
+  }
+
+  private static observeRequest(
+    url: string,
+    method: string,
+    kind: HttpRequestKind,
+    started: bigint,
+    startedAtEpochMs: number,
+    response?: Response,
+    error?: unknown
+  ): void {
+    if (!requestObserver) {
+      return;
+    }
+
+    requestObserver({
+      url,
+      method,
+      kind,
+      startedAtEpochMs,
+      durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
+      status: response?.status,
+      ok: response?.ok,
+      serverTiming: response?.headers.get("server-timing"),
+      error: error instanceof Error ? error.message : error === undefined ? undefined : String(error),
+    });
   }
 
   async fetch(

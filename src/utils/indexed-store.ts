@@ -2,7 +2,7 @@ import { Store, Parser } from 'n3';
 
 export class IndexedStore {
   private loadingPromises = new Map<string, Promise<void>>();
-  public store = new Store();
+  private stores = new Map<string, Store>();
 
   private extractTurtleFromHtml(html: string): string {
     const scriptRegex = /<script[^>]*type=["']text\/turtle["'][^>]*>([\s\S]*?)<\/script>/gi;
@@ -49,7 +49,9 @@ export class IndexedStore {
           }
 
           const parser = new Parser({format: 'text/turtle', baseIRI: source});
-          this.store.addQuads(parser.parse(data));
+          const sourceStore = new Store();
+          sourceStore.addQuads(parser.parse(data));
+          this.stores.set(source, sourceStore);
         } catch (error) {
           console.log(`Error loading source ${source}:`, error);
           throw error;
@@ -61,6 +63,27 @@ export class IndexedStore {
     }
 
     await Promise.all(loadPromises);
+  }
+
+  get(source: string): Store {
+    const store = this.stores.get(source);
+    if (!store) {
+      throw new Error(`Source has not been indexed: ${source}`);
+    }
+    return store;
+  }
+
+  getMany(sources: string[]): Store[] {
+    return sources.map(source => this.get(source));
+  }
+
+  getAll(): Store[] {
+    return [...this.stores.values()];
+  }
+
+  countQuads(sources?: string[]): number {
+    const stores = sources ? this.getMany(sources) : this.getAll();
+    return stores.reduce((sum, store) => sum + store.size, 0);
   }
 
 }
