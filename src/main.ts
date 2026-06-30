@@ -53,6 +53,8 @@ export interface ExperimentConfig {
 export interface Config {
   podsPerServer: number;
   useExistingData?: boolean;
+  experimentDataRoot?: string;
+  resourceRegistrationAuthorizedWebId?: string;
   experiments: Record<string, ExperimentConfig>;
 }
 
@@ -132,13 +134,15 @@ async function runExperiment(
   experimentConfig: ExperimentConfig,
   useExistingData: boolean,
   authorizationMode: AuthorizationMode,
-  loggingOptions?: LoggingOptions
+  loggingOptions?: LoggingOptions,
+  resourceRegistrationAuthorizedWebId?: string,
+  experimentDataRoot: string = "./experiment-data"
 ): Promise<ExperimentResult[]> {
   if (loggingOptions?.experiment) {
     Logger.setLevel(loggingOptions.experiment);
   }
 
-  const experimentLocation = path.resolve(`./experiment-data/${experimentName}`);
+  const experimentLocation = path.resolve(experimentDataRoot, experimentName);
   let experiment: Experiment | null = null;
   let setup: ExperimentSetup | null = null;
 
@@ -192,7 +196,8 @@ async function runExperiment(
     authorizationMode,
     setup.servers,
     setup.queryUser,
-    loggingOptions
+    loggingOptions,
+    resourceRegistrationAuthorizedWebId
   );
 
   getAggregatorIdStore().clear();
@@ -233,7 +238,9 @@ async function runExperimentWithRetries(
   experimentConfig: ExperimentConfig,
   useExistingData: boolean,
   authorizationMode: AuthorizationMode,
-  loggingOptions?: LoggingOptions
+  loggingOptions?: LoggingOptions,
+  resourceRegistrationAuthorizedWebId?: string,
+  experimentDataRoot?: string
 ): Promise<ExperimentResult[]> {
   let lastError: unknown;
 
@@ -248,7 +255,9 @@ async function runExperimentWithRetries(
         experimentConfig,
         useExistingData,
         authorizationMode,
-        loggingOptions
+        loggingOptions,
+        resourceRegistrationAuthorizedWebId,
+        experimentDataRoot
       );
     } catch (error) {
       lastError = error;
@@ -266,7 +275,12 @@ async function runExperimentWithRetries(
 }
 
 async function main() {
-  const configPath = path.resolve('./configs/complete-config.json');
+  const configArgIndex = process.argv.indexOf("--config");
+  const configPath = path.resolve(
+    configArgIndex >= 0 && process.argv[configArgIndex + 1]
+      ? process.argv[configArgIndex + 1]
+      : './configs/complete-config.json'
+  );
 
   if (!fs.existsSync(configPath)) {
     console.error(`Config file not found: ${configPath}`);
@@ -282,6 +296,12 @@ async function main() {
   const failedExperiments: Array<{name: string, error: any}> = [];
   const successfulExperiments: string[] = [];
   const loggingOptions = getLoggingOptionsFromEnv();
+  const resourceRegistrationAuthorizedWebId =
+    process.env.UMA_RESOURCE_REGISTRATION_AUTHORIZED_WEBID?.trim() ||
+    config.resourceRegistrationAuthorizedWebId?.trim();
+  const experimentDataRoot = process.env.EXPERIMENT_DATA_ROOT?.trim() ||
+    config.experimentDataRoot?.trim() ||
+    "./experiment-data";
 
   for (const [experimentName, experimentConfig] of Object.entries(config.experiments)) {
     console.log(`\n========================================`);
@@ -296,10 +316,10 @@ async function main() {
         ? ["no-auth", "nondelegated", "delegated"]
         : [experimentConfig.delegatedAuth ? "delegated" : "nondelegated"]);
 
+    const includeAuthorizationModeSuffix = authorizationModes.length > 1;
+
     for (const authorizationMode of authorizationModes) {
-      const suffix = experimentConfig.authorizationModes === undefined && experimentConfig.delegatedAuth === undefined
-        ? `-${authorizationMode}`
-        : '';
+      const suffix = includeAuthorizationModeSuffix ? `-${authorizationMode}` : '';
 
       const fullExperimentName = `${experimentName}${suffix}`;
 
@@ -312,7 +332,9 @@ async function main() {
           configWithPods,
           config.useExistingData ?? false,
           authorizationMode,
-          loggingOptions
+          loggingOptions,
+          resourceRegistrationAuthorizedWebId,
+          experimentDataRoot
         );
 
         const resultRunCounts = new Map<string, number>();

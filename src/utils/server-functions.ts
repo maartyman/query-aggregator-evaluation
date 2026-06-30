@@ -1,4 +1,5 @@
 import {type ChildProcess, exec, spawn} from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
 import {PodContext, ServerInstanceContext} from "../data-generator";
 import type {LoggingOptions} from "../main";
@@ -99,6 +100,56 @@ async function stopTrackedProcesses(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 1000));
 }
 
+async function allSeededAccountsHavePat(serverDataPath: string): Promise<boolean> {
+  const accountsDataDir = path.join(serverDataPath, ".internal", "accounts", "data");
+  let files: string[];
+  try {
+    files = await fs.readdir(accountsDataDir);
+  } catch {
+    return false;
+  }
+
+  const accountFiles = files.filter(file => file.endsWith("$.json"));
+  if (accountFiles.length === 0) {
+    return false;
+  }
+
+  for (const file of accountFiles) {
+    const content = await fs.readFile(path.join(accountsDataDir, file), "utf8");
+    const account = JSON.parse(content).payload as { authzServer?: string; asToken?: unknown };
+    if (account.authzServer && !account.asToken) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function waitForCssAuthBootstrap(dataLocation: string, servers: ServerInstanceContext[]): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const ready = await Promise.all(servers.map(server =>
+      allSeededAccountsHavePat(path.join(dataLocation, server.relativePath))
+    ));
+    if (ready.every(Boolean)) {
+      return;
+    }
+
+    console.log("Waiting for CSS auth bootstrap to complete...");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  throw new Error("Timed out while waiting for CSS auth bootstrap to complete");
+}
+
+async function pathExists(location: string): Promise<boolean> {
+  try {
+    await fs.access(location);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function stopServers(servers: ServerInstanceContext[] = trackedServers): Promise<void> {
   await stopTrackedProcesses();
   await killProcessOnPort(5000); // aggregator port
@@ -116,7 +167,8 @@ export async function startServers(
   authorizationMode: AuthorizationMode,
   servers: ServerInstanceContext[],
   queryUser: PodContext,
-  loggingOptions?: LoggingOptions
+  loggingOptions?: LoggingOptions,
+  resourceRegistrationAuthorizedWebId?: string
 ): Promise<void> {
   trackedServers = servers;
 
@@ -135,25 +187,52 @@ export async function startServers(
       : authorizationMode === "nondelegated"
         ? "./config/nondelegated.json"
         : "./config/delegated.json";
-    const command = `cd ${umaLocation} && node ${umaLocation}/bin/main.js --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url http://localhost:${server.umaPort}/uma --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}`;
+    const authorizedWebId = resourceRegistrationAuthorizedWebId?.trim() || queryUser.webId;
+    const authorizedWebIdOption = authorizationMode !== "no-auth"
+      ? ` --resourceRegistrationAuthorizedWebId "${authorizedWebId}"`
+      : "";
+    const umaPrecompiledEntry = path.join(umaLocation, "bin", "main-precompiled.js");
+    const umaPrecompiledApp = path.join(umaLocation, "dist", "precompiled", `app-${authorizationMode}.js`);
+    const umaEntry = await pathExists(umaPrecompiledEntry) && await pathExists(umaPrecompiledApp)
+      ? `${umaLocation}/bin/main-precompiled.js --mode ${authorizationMode}`
+      : `${umaLocation}/bin/main.js`;
+    const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --backupFilePath "${server.umaPolicyBackupPath}" --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
     runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
   }
 
-  console.log("waiting 2 seconds before starting CSS servers...");
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  console.log("waiting 1 seconds before starting CSS servers...");
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  const cssConfigLocation = authorizationMode === "no-auth"
+    ? "./config/no-auth.json"
+    : "./config/default.json";
+  const cssPatConfigLocation = authorizationMode === "no-auth"
+    ? ""
+    : " ./config/init-pat.json";
 
   for (const server of servers) {
     const serverDataPath = path.join(dataLocation, server.relativePath);
     const cssLogLevel = loggingOptions?.css ?? 'error';
-    const command = `cd "${cssLocation}" && node bin/community-solid-server-isolated.js -m . -c ./config/default.json --baseUrl ${server.solidBaseUrl} --authServer ${server.umaBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
+    const cssPrecompiledEntry = path.join(cssLocation, "bin", "community-solid-server-precompiled.js");
+    const cssPrecompiledApp = path.join(
+      cssLocation,
+      "dist",
+      "precompiled",
+      authorizationMode === "no-auth" ? "app-no-auth.js" : "app-auth.js"
+    );
+    const cssCommand = await pathExists(cssPrecompiledEntry) && await pathExists(cssPrecompiledApp)
+      ? `node ./bin/community-solid-server-precompiled.js`
+      : `yarn run community-solid-server`;
+    const command = `cd "${cssLocation}" && ${cssCommand} -m . -c ${cssConfigLocation}${cssPatConfigLocation} --baseUrl ${server.solidBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
     runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
   }
 
-  console.log("waiting 15 seconds before starting aggregator...");
-  await new Promise(resolve => setTimeout(resolve, 15000));
+  console.log("waiting 1 seconds before starting aggregator...");
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
   const queryUserWebId = `${queryUser.baseUrl}/profile/card#me`;
-  while (true) {
+  const cssReadyDeadline = Date.now() + 120_000;
+  while (Date.now() < cssReadyDeadline) {
     let allServersUp = true;
     for (const server of servers) {
       try {
@@ -172,6 +251,13 @@ export async function startServers(
     }
     console.log("Waiting for CSS servers to be up...");
     await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  if (Date.now() >= cssReadyDeadline) {
+    throw new Error("Timed out while waiting for CSS servers to be up");
+  }
+
+  if (authorizationMode !== "no-auth") {
+    await waitForCssAuthBootstrap(dataLocation, servers);
   }
 
   console.log("Starting aggregator...");

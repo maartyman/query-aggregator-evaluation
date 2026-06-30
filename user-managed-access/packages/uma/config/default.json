@@ -1,24 +1,31 @@
 {
   "@context": [
     "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld",
-    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^7.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^8.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/asynchronous-handlers/^1.0.0/components/context.jsonld"
   ],
   "import": [
+    "sai-uma:config/credentials/parsers/default.json",
+    "sai-uma:config/credentials/validators/pat.json",
     "sai-uma:config/credentials/verifiers/default.json",
     "sai-uma:config/dialog/negotiators/default.json",
     "sai-uma:config/policies/authorizers/default.json",
     "sai-uma:config/resources/storage/default.json",
     "sai-uma:config/routes/discovery.json",
     "sai-uma:config/routes/introspection.json",
+    "sai-uma:config/routes/client-registration.json",
     "sai-uma:config/routes/keys.json",
     "sai-uma:config/routes/resources.json",
+    "sai-uma:config/routes/resource-owner-assets.json",
     "sai-uma:config/routes/tickets.json",
     "sai-uma:config/routes/tokens.json",
     "sai-uma:config/routes/log.json",
     "sai-uma:config/routes/vc.json",
+    "sai-uma:config/routes/policies.json",
+    "sai-uma:config/routes/accessrequests.json",
     "sai-uma:config/routes/contract.json",
     "sai-uma:config/tickets/storage/default.json",
-    "sai-uma:config/tickets/strategy/claim-elimination.json",
+    "sai-uma:config/tickets/strategy/immediate-authorizer.json",
     "sai-uma:config/tokens/factory/default.json",
     "sai-uma:config/tokens/storage/default.json",
     "sai-uma:config/variables/default.json"
@@ -28,7 +35,18 @@
       "comment": "This is the entry point to the application. It can be used to both start and stop the server.",
       "@id": "urn:uma:default:App",
       "@type": "App",
-      "initializer": { "@id": "urn:uma:default:NodeHttpServer" },
+      "initializer": {
+        "@id": "urn:uma:default:Initializer",
+        "@type": "SequenceHandler",
+        "handlers": [
+          {
+            "@id": "urn:uma:default:FlexibleInitializer",
+            "@type": "SequenceHandler",
+            "handlers": []
+          },
+          { "@id": "urn:uma:default:NodeHttpServer" }
+        ]
+      },
       "finalizer": {
         "@id": "urn:uma:default:Finalizer",
         "@type": "SequenceHandler",
@@ -39,6 +57,11 @@
             "finalizable": { "@id": "urn:uma:default:NodeHttpServer" }
           }
         ]
+      },
+      "clusterManager": {
+        "@id": "urn:uma:default:ClusterManager",
+        "@type": "ClusterManager",
+        "workers": 0
       }
     },
     {
@@ -106,7 +129,7 @@
         "@type": "JsonHttpErrorHandler",
         "handler": {
           "@id": "urm:uma:default:RouteHandler",
-          "@type": "WaterfallHandler",
+          "@type": "StatusWaterfallHandler",
           "handlers": [
             {
               "comment": "Handles all JSON and form encoded input/output.",
@@ -122,7 +145,11 @@
                   { "@id": "urn:uma:default:PermissionRegistrationRoute" },
                   { "@id": "urn:uma:default:ResourceRegistrationRoute" },
                   { "@id": "urn:uma:default:ResourceRegistrationOpsRoute" },
-                  { "@id": "urn:uma:default:IntrospectionRoute" }
+                  { "@id": "urn:uma:default:ResourceOwnerAssetsRoute" },
+                  { "@id": "urn:uma:default:ResourceOwnerAssetRoute" },
+                  { "@id": "urn:uma:default:IntrospectionRoute" },
+                  { "@id": "urn:uma:default:ClientRegistrationRoute" },
+                  { "@id": "urn:uma:default:ClientRegistrationIdRoute" }
                 ]
               }
             },
@@ -133,12 +160,19 @@
               "routes": [
                 { "@id": "urn:uma:default:ContractRoute" },
                 { "@id": "urn:uma:default:LogRoute" },
-                { "@id": "urn:uma:default:VCRoute" }
+                { "@id": "urn:uma:default:VCRoute" },
+                { "@id": "urn:uma:default:PolicyRoute" },
+                { "@id": "urn:uma:default:OnePolicyRoute"},
+                { "@id": "urn:uma:default:AccessRequestRoute" },
+                { "@id": "urn:uma:default:OneAccessRequestRoute" }
               ]
             },
             {
               "@type": "StaticThrowHandler",
-              "error": { "@type": "NotFoundHttpError" }
+              "factory": {
+                "@type": "ClassErrorFactory",
+                "error": { "@type": "NotFoundHttpError" }
+              }
             }
           ]
         }

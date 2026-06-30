@@ -2,31 +2,44 @@ import {
   BadRequestHttpError,
   ConflictHttpError,
   createErrorMessage,
-  getLoggerFor,
+  ForbiddenHttpError,
   InternalServerError,
   joinUrl,
-  KeyValueStorage,
   MethodNotAllowedHttpError,
-  NotFoundHttpError,
-  UnauthorizedHttpError,
+  NotFoundHttpError, RDF,
 } from '@solid/community-server';
-import { ODRL, ODRL_P, OWL, RDF, UCRulesStorage } from '@solidlab/ucp';
-import { DataFactory as DF, NamedNode, Quad, Quad_Object, Quad_Subject, Store } from 'n3';
+import { getLoggerFor } from 'global-logger-factory';
+import { DataFactory as DF, NamedNode, Quad, Quad_Subject, Store } from 'n3';
 import { randomUUID } from 'node:crypto';
+import { UCRulesStorage } from '../ucp/storage/UCRulesStorage';
+import { ODRL, ODRL_P, OWL } from '../ucp/util/Vocabularies';
 import {
   HttpHandler,
   HttpHandlerContext,
   HttpHandlerRequest,
   HttpHandlerResponse
 } from '../util/http/models/HttpHandler';
-import { extractRequestSigner, verifyRequest } from '../util/HttpMessageSignatures';
+import { Registration } from '../util/RegistrationStore';
+import { ResourceOwnerAssetEventEmitter } from '../util/ResourceOwnerAssetEvents';
+import { RequestValidator, RequestValidatorOutput } from '../util/http/validate/RequestValidator';
+import { RegistrationStore } from '../util/RegistrationStore';
 import { reType } from '../util/ReType';
+import {
+  createOwnerAccessPolicy,
+  createRegisteredResourceAccessPolicy,
+  getRegisteredResourceAccessPolicyId,
+  hasOwnerAccessPolicy,
+} from '../util/SystemPolicy';
 import { ResourceDescription } from '../views/ResourceDescription';
 
 /**
  * The necessary metadata to describe an asset collection based on a relation.
  */
 export type CollectionMetadata = { relation: NamedNode, source: NamedNode, reverse: boolean };
+
+const getCurrentTimestamp = (): string => new Date().toISOString();
+const DERIVED_RESOURCE_TYPE = 'https://w3id.org/aggregator#DerivedResource';
+const encodePolicyIdPart = (value: string): string => Buffer.from(value).toString('base64url');
 
 /**
  * A ResourceRegistrationRequestHandler is tasked with implementing
@@ -38,34 +51,66 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
   protected readonly logger = getLoggerFor(this);
 
   /**
-   * @param resourceStore - Key/value store containing the {@link ResourceDescription}s.
+   * @param registrationStore - Key/value store containing the {@link ResourceDescription}s.
    * @param policies - Policy store to contain the asset relation triples.
+   * @param validator - Validates that the request is valid.
    */
   constructor(
-    private readonly resourceStore: KeyValueStorage<string, ResourceDescription>,
-    private readonly policies: UCRulesStorage,
+    protected readonly registrationStore: RegistrationStore,
+    protected readonly policies: UCRulesStorage,
+    protected readonly validator: RequestValidator,
+    protected readonly assetEvents?: ResourceOwnerAssetEventEmitter,
+    protected readonly resourceRegistrationAuthorizedWebId?: string,
   ) {
     super();
   }
 
   public async handle({ request }: HttpHandlerContext): Promise<HttpHandlerResponse<any>> {
-    const signer = await extractRequestSigner(request);
-
-    // TODO: check if signer is actually the correct one
-
-    if (!await verifyRequest(request, signer)) {
-      throw new UnauthorizedHttpError(`Failed to verify signature of <${signer}>`);
-    }
+    const validation = await this.validator.handleSafe({ request });
+    const { owner, resourceServer } = validation;
 
     switch (request.method) {
-      case 'POST': return this.handlePost(request);
-      case 'PUT': return this.handlePut(request);
-      case 'DELETE': return this.handleDelete(request);
+      case 'GET':
+        if (typeof request.parameters?.id === 'string') {
+          return this.handleGet(request, owner, validation);
+        }
+        throw new MethodNotAllowedHttpError([ request.method ]);
+      case 'POST': return this.handlePost(request, owner, resourceServer);
+      case 'PUT': return this.handlePut(request, owner, resourceServer, validation);
+      case 'DELETE': return this.handleDelete(request, owner, validation);
       default: throw new MethodNotAllowedHttpError([ request.method ]);
     }
   }
 
-  protected async handlePost(request: HttpHandlerRequest): Promise<HttpHandlerResponse> {
+  protected async handleGet(
+    { parameters }: HttpHandlerRequest,
+    owner: string,
+    validation: RequestValidatorOutput,
+  ): Promise<HttpHandlerResponse> {
+    if (typeof parameters?.id !== 'string') {
+      throw new InternalServerError('URI for GET operation should include an id.');
+    }
+    this.validateBoundResource(parameters.id, validation);
+
+    const entry = await this.registrationStore.get(parameters.id);
+    if (!entry) {
+      throw new NotFoundHttpError();
+    }
+    if (entry.owner !== owner) {
+      throw new ForbiddenHttpError(`${owner} is not the owner of this resource.`);
+    }
+
+    return {
+      status: 200,
+      body: entry.description,
+    };
+  }
+
+  protected async handlePost(
+    request: HttpHandlerRequest,
+    owner: string,
+    resourceServer?: string,
+  ): Promise<HttpHandlerResponse> {
     const { body } = request;
 
     try {
@@ -74,13 +119,12 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
       this.logger.warn(`Syntax error: ${createErrorMessage(e)}, ${body}`);
       throw new BadRequestHttpError(`Request has bad syntax: ${createErrorMessage(e)}`);
     }
-    this.normalizeDerivedFrom(body);
 
     // We are using the name as the UMA identifier for now.
     // Reason being that there is not yet a good way to determine what the identifier would be when writing policies.
     let resource = body.name;
     if (resource) {
-      if (await this.resourceStore.has(resource)) {
+      if (await this.registrationStore.has(resource)) {
         throw new ConflictHttpError(
           `A resource with name ${resource} is already registered. Use PUT to update existing registrations.`,
         );
@@ -91,7 +135,8 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
     }
 
     // Set the resource metadata
-    await this.setResourceMetadata(resource, body);
+    const registration = await this.setResourceMetadata(resource, body, owner, resourceServer);
+    this.assetEvents?.emit({ type: 'created', id: resource, owner, registration });
 
     return ({
       status: 201,
@@ -103,13 +148,24 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
     });
   }
 
-  protected async handlePut({ body, parameters }: HttpHandlerRequest): Promise<HttpHandlerResponse> {
+  protected async handlePut(
+    { body, parameters }: HttpHandlerRequest,
+    owner: string,
+    resourceServer?: string,
+    validation: RequestValidatorOutput = { owner },
+  ): Promise<HttpHandlerResponse> {
     if (typeof parameters?.id !== 'string') {
       throw new InternalServerError('URI for PUT operation should include an id.');
     }
+    this.validateBoundResource(parameters.id, validation);
 
-    if (!await this.resourceStore.has(parameters.id)) {
+    const entry = await this.registrationStore.get(parameters.id);
+    if (!entry && !validation.allowCreate) {
       throw new NotFoundHttpError();
+    }
+
+    if (entry && entry.owner !== owner) {
+      throw new ForbiddenHttpError(`${owner} is not the owner of this resource.`);
     }
 
     try {
@@ -118,10 +174,10 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
       this.logger.warn(`Syntax error: ${createErrorMessage(e)}, ${body}`);
       throw new BadRequestHttpError(`Request has bad syntax: ${createErrorMessage(e)}`);
     }
-    this.normalizeDerivedFrom(body);
 
     // Update the resource metadata
-    await this.setResourceMetadata(parameters.id, body);
+    const registration = await this.setResourceMetadata(parameters.id, body, owner, resourceServer);
+    this.assetEvents?.emit({ type: 'updated', id: parameters.id, owner, registration });
 
     return ({
       status: 200,
@@ -132,44 +188,197 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
     });
   }
 
-  protected async handleDelete({ parameters }: HttpHandlerRequest): Promise<HttpHandlerResponse> {
+  protected async handleDelete(
+    { parameters }: HttpHandlerRequest,
+    owner: string,
+    validation: RequestValidatorOutput = { owner },
+  ): Promise<HttpHandlerResponse> {
     if (typeof parameters?.id !== 'string') {
       throw new InternalServerError('URI for DELETE operation should include an id.');
     }
+    this.validateBoundResource(parameters.id, validation);
 
-    if (!await this.resourceStore.has(parameters.id)) {
+    const entry = await this.registrationStore.get(parameters.id);
+    if (!entry) {
       throw new NotFoundHttpError('Registration to be deleted does not exist (id unknown).');
     }
 
-    await this.resourceStore.delete(parameters.id);
+    if (entry.owner !== owner) {
+      throw new ForbiddenHttpError(`${owner} is not the owner of this resource.`);
+    }
+
+    await this.policies.removeData(new Store([
+      ...createOwnerAccessPolicy(parameters.id, owner).getQuads(null, null, null, null),
+      ...this.createConfiguredAccessPolicy(parameters.id, entry.owner, entry.description)
+        .getQuads(null, null, null, null),
+    ]));
+    await this.registrationStore.delete(parameters.id);
+    this.assetEvents?.emit({ type: 'deleted', id: parameters.id, owner, registration: entry });
     this.logger.info(`Deleted resource ${parameters.id}.`);
 
     return ({ status: 204 });
+  }
+
+  protected validateBoundResource(id: string, validation: RequestValidatorOutput): void {
+    if (validation.resourceId && validation.resourceId !== id) {
+      throw new ForbiddenHttpError('Authorization is not valid for this resource.');
+    }
   }
 
   /**
    * Updates all asset collection and relation metadata for the given resource based on an updated description.
    * @param id - The identifier of the resource.
    * @param description - The new {@link ResourceDescription} for the resource.
+   * @param owner - The owner of the resource.
    */
-  protected async setResourceMetadata(id: string, description: ResourceDescription): Promise<void> {
+  protected async setResourceMetadata(
+    id: string,
+    description: ResourceDescription,
+    owner: string,
+    resourceServer?: string,
+  ): Promise<Registration> {
+    const previous = await this.registrationStore.get(id);
     const policyStore = await this.policies.getStore();
+    const ownerPolicyQuads = hasOwnerAccessPolicy(policyStore, id)
+      ? []
+      : createOwnerAccessPolicy(id, owner)
+        .getQuads(null, null, null, null)
+        .filter((entry) => !policyStore.has(entry));
+    const previousConfiguredAccessPolicy = previous
+      ? this.createConfiguredAccessPolicy(id, previous.owner, previous.description)
+      : undefined;
+    const configuredAccessPolicy = this.createConfiguredAccessPolicy(id, owner, description);
+    const derivedResourcePolicyQuads = this.createDerivedResourceAccessPolicies(policyStore, id, description);
     const collectionQuads = await this.updateCollections(policyStore, id, description);
     const relationQuads = await this.updateRelations(policyStore, id, description);
-    const addQuads = [ ...collectionQuads.add, ...relationQuads.add ];
+    const addQuads = [
+      ...ownerPolicyQuads,
+      ...configuredAccessPolicy.getQuads(null, null, null, null)
+        .filter((entry) => !policyStore.has(entry)),
+      ...derivedResourcePolicyQuads,
+      ...collectionQuads.add,
+      ...relationQuads.add
+    ];
     if (addQuads.length > 0) {
-      await this.policies.addRule(new Store([...collectionQuads.add, ...relationQuads.add]));
+      await this.policies.addRule(new Store(addQuads));
     }
-    const removeQuads = [ ...collectionQuads.remove, ...relationQuads.remove ];
+    const removeQuads = [
+      ...collectionQuads.remove,
+      ...relationQuads.remove,
+      ...this.findExistingConfiguredAccessPolicyQuads(policyStore, id),
+      ...(previousConfiguredAccessPolicy?.getQuads(null, null, null, null) ?? []),
+    ].filter((quad) => !configuredAccessPolicy.has(quad));
     if (removeQuads.length > 0) {
-      await this.policies.removeData(new Store([...collectionQuads.remove, ...relationQuads.remove]));
+      await this.policies.removeData(new Store(removeQuads));
     }
 
     // Store the new UMA ID (or update the contents of the existing one)
     // Note that we only do this after generating and updating the relation metadata,
     // as errors could be thrown there.
-    await this.resourceStore.set(id, description);
+    const timestamp = getCurrentTimestamp();
+    const registration: Registration = {
+      description,
+      owner,
+      resourceServer: resourceServer ?? previous?.resourceServer,
+      registeredAt: previous?.registeredAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+    await this.registrationStore.set(id, registration);
     this.logger.info(`Updated registration for ${id}.`);
+    return registration;
+  }
+
+  protected createConfiguredAccessPolicy(
+    id: string,
+    owner: string,
+    description: ResourceDescription,
+  ): Store {
+    const assignee = this.resourceRegistrationAuthorizedWebId?.trim();
+    if (!assignee) {
+      return new Store();
+    }
+    return createRegisteredResourceAccessPolicy(id, owner, assignee, description.resource_scopes);
+  }
+
+  protected findExistingConfiguredAccessPolicyQuads(policyStore: Store, id: string): Quad[] {
+    const assignee = this.resourceRegistrationAuthorizedWebId?.trim();
+    if (!assignee) {
+      return [];
+    }
+
+    const policy = DF.namedNode(getRegisteredResourceAccessPolicyId(id, assignee));
+    const permissions = policyStore.getObjects(policy, ODRL.terms.permission, null);
+    return [
+      ...policyStore.getQuads(policy, null, null, null),
+      ...permissions.flatMap((permission) => policyStore.getQuads(permission, null, null, null)),
+    ];
+  }
+
+  protected createDerivedResourceAccessPolicies(
+    policyStore: Store,
+    id: string,
+    description: ResourceDescription,
+  ): Quad[] {
+    if (description.type !== DERIVED_RESOURCE_TYPE || !description.source_url) {
+      return [];
+    }
+
+    const target = DF.namedNode(id);
+    const result: Quad[] = [];
+    const sourcePermissions = this.findSourcePermissions(policyStore, description.source_url);
+
+    for (const sourcePermission of sourcePermissions) {
+      const actions = policyStore.getObjects(sourcePermission, ODRL.terms.action, null);
+      const assignees = policyStore.getObjects(sourcePermission, ODRL.terms.assignee, null);
+      const assigners = policyStore.getObjects(sourcePermission, ODRL.terms.assigner, null);
+
+      for (const action of actions) {
+        for (const assignee of assignees) {
+          const assigner = assigners[0] ?? assignee;
+          const policyId = DF.namedNode(
+            `urn:solidlab:uma:policy:derived-access:${encodePolicyIdPart(`${description.source_url}|${id}|${assignee.value}|${action.value}`)}`
+          );
+          const permissionId = DF.namedNode(
+            `urn:solidlab:uma:permission:derived-access:${encodePolicyIdPart(`${description.source_url}|${id}|${assignee.value}|${action.value}`)}`
+          );
+
+          const quads = [
+            DF.quad(policyId, RDF.terms.type, ODRL.terms.Agreement),
+            DF.quad(policyId, ODRL.terms.uid, policyId),
+            DF.quad(policyId, ODRL.terms.permission, permissionId),
+            DF.quad(permissionId, RDF.terms.type, ODRL.terms.Permission),
+            DF.quad(permissionId, ODRL.terms.action, action),
+            DF.quad(permissionId, ODRL.terms.target, target),
+            DF.quad(permissionId, ODRL.terms.assignee, assignee),
+            DF.quad(permissionId, ODRL.terms.assigner, assigner),
+          ];
+          result.push(...quads.filter((quad) => !policyStore.has(quad)));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  protected findSourcePermissions(policyStore: Store, sourceUrl: string): Quad_Subject[] {
+    const sourceWithoutFragment = sourceUrl.split('#')[0];
+    const permissions = new Set<Quad_Subject>();
+    for (const targetQuad of policyStore.getQuads(null, ODRL.terms.target, null, null)) {
+      if (targetQuad.object.termType !== 'NamedNode') {
+        continue;
+      }
+      const target = targetQuad.object.value;
+      const targetWithoutFragment = target.split('#')[0];
+      if (
+        target === sourceUrl ||
+        target === sourceWithoutFragment ||
+        targetWithoutFragment === sourceWithoutFragment ||
+        (target.endsWith('/') && sourceWithoutFragment.startsWith(target))
+      ) {
+        permissions.add(targetQuad.subject);
+      }
+    }
+    return Array.from(permissions);
   }
 
   /**
@@ -302,9 +511,6 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
       }
       const relationNode = DF.namedNode(relation);
       for (const source of id ? [ id ] : value) {
-        if (relation === 'prov:wasDerivedFrom' && typeof source !== 'string') {
-          continue;
-        }
         const entry: CollectionMetadata = {
           relation: relationNode,
           source: DF.namedNode(source),
@@ -314,15 +520,6 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
       }
     }
     return result;
-  }
-
-  protected normalizeDerivedFrom(description: ResourceDescription): void {
-    if (!description.derived_from || description.derived_from.length === 0) {
-      return;
-    }
-    description.resource_relations = description.resource_relations ?? {};
-    const relations = description.resource_relations as NodeJS.Dict<unknown>;
-    relations['prov:wasDerivedFrom'] = description.derived_from;
   }
 
   /**
@@ -360,22 +557,15 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
   protected generatePartOfTriples(part: NamedNode, entries: CollectionMetadata[], policyStore: Store): Quad[] {
     const quads: Quad[] = [];
     for (const entry of entries) {
-      if (entry.relation.value === "prov:wasDerivedFrom") {
-        // Skip prov:wasDerivedFrom relations as these are handled elsewhere
-        continue;
-      }
       const collectionIds = this.findCollectionIds(entry, policyStore);
       if (collectionIds.length === 0) {
         throw new BadRequestHttpError(`Registering resource with relation ${entry.relation.value} to ${
           entry.source.value} while there is no matching collection.`);
       }
 
-      // for (const collectionId of collectionIds) {
-      //   quads.push(DF.quad(part, ODRL.terms.partOf, collectionId));
-      // }
-      // TODO: the above code is correct, but the code below is currently needed because of a bug in the ODRL evaluator
-      //       https://github.com/SolidLabResearch/ODRL-Evaluator/issues/8
-      quads.push(DF.quad(part, ODRL.terms.partOf, entry.source));
+      for (const collectionId of collectionIds) {
+        quads.push(DF.quad(part, ODRL.terms.partOf, collectionId));
+      }
     }
     return quads;
   }
@@ -389,10 +579,11 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
   protected findCollectionIds(entry: CollectionMetadata, data: Store): Quad_Subject[] {
     const sourceMatches = data.getSubjects(ODRL.terms.source, entry.source, null);
     if (entry.reverse) {
-      const blanks = sourceMatches.flatMap((subject): Quad_Object[] =>
-        data.getObjects(subject, ODRL_P.terms.relation, null)) as Quad_Subject[];
-      return blanks.filter((subject): boolean =>
-        data.has(DF.quad(subject, OWL.terms.inverseOf, entry.relation)));
+      const blankQuads = sourceMatches.flatMap((subject): Quad[] =>
+        data.getQuads(subject, ODRL_P.terms.relation, null, null));
+      const matchedBlankQuads = blankQuads.filter((quad): boolean =>
+        data.has(DF.quad(quad.object as Quad_Subject, OWL.terms.inverseOf, entry.relation)));
+      return matchedBlankQuads.map((quad) => quad.subject);
     } else {
       return sourceMatches.filter((subject): boolean =>
         data.has(DF.quad(subject, ODRL_P.terms.relation, entry.relation)));

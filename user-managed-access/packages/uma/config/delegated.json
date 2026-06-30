@@ -4,5 +4,17 @@
   ],
   "import": [
     "sai-uma:config/default.json"
+  ],
+  "@graph": [
+    {
+      "comment": "Benchmark delegated authorization: require upstream derivation access-token claims before resolving tickets.",
+      "@id": "urn:uma:delegated:TicketingStrategy",
+      "@type": "Override",
+      "overrideInstance": { "@id": "urn:uma:default:TicketingStrategy" },
+      "overrideParameters": {
+        "@type": "ClaimEliminationStrategy",
+        "authorizer": { "@id": "urn:uma:default:Authorizer" }
+      }
+    }
   ]
 }

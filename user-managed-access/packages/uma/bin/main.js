@@ -1,77 +1,66 @@
 const path = require('path');
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
 const { ComponentsManager } = require('componentsjs');
-const { ModuleStateBuilder } = require('componentsjs/lib/loading/ModuleStateBuilder');
-const { setGlobalLoggerFactory, WinstonLoggerFactory } = require('@solid/community-server');
+const { setGlobalLoggerFactory, WinstonLoggerFactory } = require('global-logger-factory');
 
-function parseArgs(argv) {
-  const result = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (!arg.startsWith('--')) {
-      continue;
-    }
-    const [key, value] = arg.includes('=') ? arg.split('=') : [arg, argv[i + 1]];
-    const normalizedKey = key.replace(/^--/, '');
-    if (value === undefined || value.startsWith('--')) {
-      result[normalizedKey] = true;
-      if (value && value.startsWith('--')) {
-        i--;
-      }
-    } else {
-      result[normalizedKey] = value;
-      if (!arg.includes('=')) {
-        i++;
-      }
-    }
-  }
-  return result;
-}
+const argv = yargs(hideBin(process.argv))
+  .option('port', {
+    alias: 'p',
+    type: 'number',
+    description: 'Port number for the UMA server',
+    default: 4000
+  })
+  .option('baseUrl', {
+    alias: 'b',
+    type: 'string',
+    description: 'Base URL for the UMA server',
+    default: `http://localhost:4000/uma`
+  })
+  .option('loggingLevel', {
+    alias: 'l',
+    type: 'string',
+    description: 'Log level for the UMA server',
+    default: 'info'
+  })
+  .option('configLocation', {
+    type: 'string',
+    description: 'Config file for the UMA server',
+    default: './config/default.json'
+  })
+  .option('backupFilePath', {
+    alias: 'f',
+    type: 'string',
+    description: 'Backup file path for the UMA server',
+    default: ''
+  })
+  .option('resourceRegistrationAuthorizedWebId', {
+    type: 'string',
+    description: 'WebID that receives all registered scopes for every registered resource',
+    default: ''
+  })
+  .help()
+  .alias('help', 'h')
+  .argv;
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+const rootDir = path.join(__dirname, '../');
 
-  const logLevel = (args['log-level'] || 'info').toLowerCase();
-  const port = Number(args.port || 4000);
-  if (!Number.isFinite(port)) {
-    throw new Error(`Invalid UMA port value: ${args.port}`);
-  }
-  const rootDir = path.join(__dirname, '../');
-  const baseUrl = args['base-url'] || `http://localhost:${port}/uma`;
-  const policyBase = args['policy-base'] || 'http://localhost:3000/';
-
+const launch = async () => {
   const variables = {};
-  variables['urn:uma:variables:port'] = port;
-  variables['urn:uma:variables:baseUrl'] = baseUrl;
-  variables['urn:uma:variables:policyBaseIRI'] = policyBase;
-  variables['urn:uma:variables:policyDir'] = path.join(rootDir, './config/rules/policy');
+
+  variables['urn:uma:variables:port'] = argv.port;
+  variables['urn:uma:variables:baseUrl'] = argv.baseUrl;
   variables['urn:uma:variables:eyePath'] = 'eye';
+  variables['urn:uma:variables:backupFilePath'] = argv.backupFilePath;
+  variables['urn:uma:variables:resourceRegistrationAuthorizedWebId'] = argv.resourceRegistrationAuthorizedWebId;
 
-  const configPath = path.resolve(rootDir, args['config-location'] || './config/default.json');
-  const workspaceRoot = path.join(rootDir, '../..');
+  const configPath = path.resolve(rootDir, argv.configLocation);
 
-  setGlobalLoggerFactory(new WinstonLoggerFactory(logLevel));
-
-  const moduleStateBuilder = new ModuleStateBuilder();
-  const nodeModuleImportPaths = [rootDir, workspaceRoot];
-  const nodeModulePaths = await moduleStateBuilder.buildNodeModulePaths(nodeModuleImportPaths);
-  const packageJsons = await moduleStateBuilder.buildPackageJsons(nodeModulePaths);
-  await moduleStateBuilder.preprocessPackageJsons(packageJsons);
-  const componentModules = await moduleStateBuilder.buildComponentModules(packageJsons);
-  const contexts = await moduleStateBuilder.buildComponentContexts(packageJsons);
-  const importPaths = await moduleStateBuilder.buildComponentImportPaths(packageJsons);
+  setGlobalLoggerFactory(new WinstonLoggerFactory(argv.loggingLevel));
 
   const manager = await ComponentsManager.build({
     mainModulePath: rootDir,
-    moduleState: {
-      mainModulePath: rootDir,
-      nodeModuleImportPaths,
-      nodeModulePaths,
-      packageJsons,
-      componentModules,
-      contexts,
-      importPaths,
-    },
-    logLevel,
+    logLevel: argv.loggingLevel,
     typeChecking: false,
   });
 
@@ -81,7 +70,4 @@ async function main() {
   await umaServer.start();
 };
 
-main().catch((error) => {
-  console.error('Failed to start UMA server:', error);
-  process.exit(1);
-});
+launch();
