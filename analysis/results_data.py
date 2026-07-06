@@ -30,6 +30,8 @@ SUMMARY_COLUMNS = [
     "totalDuration",
     "dief100ms",
     "dief1s",
+    "dief2500ms",
+    "dief4s",
     "dief10s",
     "totalHttpRequests",
     "resourceRequests",
@@ -71,6 +73,10 @@ AGGREGATE_COLUMNS = [
     "averageDief100ms",
     "medianDief1s",
     "averageDief1s",
+    "medianDief2500ms",
+    "averageDief2500ms",
+    "medianDief4s",
+    "averageDief4s",
     "medianDief10s",
     "averageDief10s",
 ]
@@ -180,6 +186,35 @@ def number(value: Any, default: float = 0) -> float:
         return default
 
 
+def calculate_diefficiency(timestamps: list[Any], target_time_ms: float) -> float:
+    if not timestamps:
+        return 0
+
+    time_value_pairs = []
+    for index, timestamp in enumerate(timestamps):
+        if not isinstance(timestamp, list | tuple) or len(timestamp) < 2:
+            continue
+        time_ms = number(timestamp[0]) * 1000 + number(timestamp[1]) / 1_000_000
+        time_value_pairs.append((time_ms, index + 1))
+
+    sorted_pairs = sorted(time_value_pairs, key=lambda item: item[0])
+    subtrace = [(time, count) for time, count in sorted_pairs if time <= target_time_ms]
+    if subtrace:
+        last_time, last_count = subtrace[-1]
+        if last_time < target_time_ms:
+            subtrace.append((target_time_ms, last_count))
+
+    if len(subtrace) <= 1:
+        return 0
+
+    area = 0
+    for index in range(1, len(subtrace)):
+        prev_time, prev_count = subtrace[index - 1]
+        current_time, current_count = subtrace[index]
+        area += (current_time - prev_time) * ((prev_count + current_count) / 2)
+    return area
+
+
 def normalized_cache_strategy(value: object) -> str:
     if value is None:
         return ""
@@ -275,6 +310,7 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
         parameters = data.get("parameters") or {}
+        timestamps = data.get("timestamps") or []
         if parameters.get("cacheStrategy") in EXCLUDED_CACHE_STRATEGIES:
             continue
         file_name = path.name
@@ -287,9 +323,11 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
                 "totalDuration": number(data.get("totalDuration")),
                 "dief100ms": number(data.get("dief100ms")),
                 "dief1s": number(data.get("dief1s")),
+                "dief2500ms": number(data.get("dief2500ms"), calculate_diefficiency(timestamps, 2500)),
+                "dief4s": number(data.get("dief4s"), calculate_diefficiency(timestamps, 4000)),
                 "dief10s": number(data.get("dief10s")),
                 "totalResults": int(number(data.get("totalResults"))),
-                "timestampCount": len(data.get("timestamps") or []),
+                "timestampCount": len(timestamps),
                 "experimentName": parameters.get("experimentName") or infer_experiment_name(file_name),
                 "experimentType": parameters.get("experimentType", ""),
                 "authorizationMode": parameters.get("authorizationMode") or infer_authorization_mode(file_name),
@@ -469,6 +507,10 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "averageDief100ms": round(mean(row["dief100ms"] for row in group), 3),
                 "medianDief1s": round(median(row["dief1s"] for row in group), 3),
                 "averageDief1s": round(mean(row["dief1s"] for row in group), 3),
+                "medianDief2500ms": round(median(row["dief2500ms"] for row in group), 3),
+                "averageDief2500ms": round(mean(row["dief2500ms"] for row in group), 3),
+                "medianDief4s": round(median(row["dief4s"] for row in group), 3),
+                "averageDief4s": round(mean(row["dief4s"] for row in group), 3),
                 "medianDief10s": round(median(row["dief10s"] for row in group), 3),
                 "averageDief10s": round(mean(row["dief10s"] for row in group), 3),
             }

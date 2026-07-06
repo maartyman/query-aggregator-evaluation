@@ -13,6 +13,8 @@ export class ExperimentResult {
   public totalDuration: number; // Total query duration in ms
   public dief100ms: number; // Diefficiency at 100 milliseconds
   public dief1s: number; // Diefficiency at 1 second
+  public dief2500ms: number; // Diefficiency at 2.5 seconds
+  public dief4s: number; // Diefficiency at 4 seconds
   public dief10s: number; // Diefficiency at 10 seconds
   public timestamps: [number, number][]; // [timestamp_ms, cumulative_count] pairs
   public totalResults: number;
@@ -24,6 +26,8 @@ export class ExperimentResult {
     totalDuration: number,
     dief100ms: number,
     dief1s: number,
+    dief2500ms: number,
+    dief4s: number,
     dief10s: number,
     timestamps: [number, number][],
     totalResults: number,
@@ -34,6 +38,8 @@ export class ExperimentResult {
     this.totalDuration = totalDuration;
     this.dief100ms = dief100ms;
     this.dief1s = dief1s;
+    this.dief2500ms = dief2500ms;
+    this.dief4s = dief4s;
     this.dief10s = dief10s;
     this.timestamps = timestamps;
     this.totalResults = totalResults;
@@ -55,6 +61,8 @@ export class ExperimentResult {
       obj.totalDuration,
       obj.dief100ms,
       obj.dief1s,
+      obj.dief2500ms ?? 0,
+      obj.dief4s ?? 0,
       obj.dief10s,
       obj.timestamps,
       obj.totalResults,
@@ -119,6 +127,8 @@ export class ExperimentResult {
             totalDuration,
             this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
             this.calculateDiefficiency(timestamps, [1,0]), // 1s
+            this.calculateDiefficiency(timestamps, [2,500_000_000]), // 2.5s
+            this.calculateDiefficiency(timestamps, [4,0]), // 4s
             this.calculateDiefficiency(timestamps, [10,0]), // 10s
             timestamps,
             timestamps.length,
@@ -171,6 +181,8 @@ export class ExperimentResult {
       totalDuration,
       this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
       this.calculateDiefficiency(timestamps, [1,0]), // 1s
+      this.calculateDiefficiency(timestamps, [2,500_000_000]), // 2.5s
+      this.calculateDiefficiency(timestamps, [4,0]), // 4s
       this.calculateDiefficiency(timestamps, [10,0]), // 10s
       timestamps,
       timestamps.length,

@@ -39,6 +39,8 @@ def diefficiency_options():
     return [
         {"label": "dief@100ms", "value": "medianDief100ms"},
         {"label": "dief@1s", "value": "medianDief1s"},
+        {"label": "dief@2.5s", "value": "medianDief2500ms"},
+        {"label": "dief@4s", "value": "medianDief4s"},
         {"label": "dief@10s", "value": "medianDief10s"},
     ]
 
@@ -434,6 +436,8 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     diefficiency_labels = {
         "medianDief100ms": "Median dief@100ms",
         "medianDief1s": "Median dief@1s",
+        "medianDief2500ms": "Median dief@2.5s",
+        "medianDief4s": "Median dief@4s",
         "medianDief10s": "Median dief@10s",
     }
     diefficiency_figure = px.line(
@@ -459,6 +463,8 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "runs": True,
             "medianDief100ms": ":.3f",
             "medianDief1s": ":.3f",
+            "medianDief2500ms": ":.3f",
+            "medianDief4s": ":.3f",
             "medianDief10s": ":.3f",
             "medianDurationMs": ":.3f",
             "medianHttpRequests": ":.3f",
@@ -497,6 +503,8 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianDurationMs": ":.3f",
             "medianDief100ms": ":.3f",
             "medianDief1s": ":.3f",
+            "medianDief2500ms": ":.3f",
+            "medianDief4s": ":.3f",
             "medianDief10s": ":.3f",
             "medianHttpRequests": ":.3f",
         },
