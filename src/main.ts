@@ -75,6 +75,36 @@ const WARMUP_RUNS = getNonNegativeIntegerEnv("WARMUP_RUNS", 1);
 const RECORDED_RUNS = getNonNegativeIntegerEnv("RECORDED_RUNS", 30);
 const EXPERIMENT_ATTEMPTS = Math.max(1, getNonNegativeIntegerEnv("EXPERIMENT_ATTEMPTS", 5));
 
+function formatTimestamp(date: Date): string {
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const millis = Math.round(milliseconds % 1000);
+
+  const parts = [];
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`);
+  }
+  parts.push(`${seconds}.${String(millis).padStart(3, "0")}s`);
+  return parts.join(" ");
+}
+
 function getLoggingOptionsFromEnv(): LoggingOptions | undefined {
   const loggingOptions: LoggingOptions = {};
   if (process.env.EXPERIMENT_LOG_LEVEL) {
@@ -275,6 +305,8 @@ async function runExperimentWithRetries(
 }
 
 async function main() {
+  const runStartedAt = new Date();
+  const runStartedHrTime = process.hrtime.bigint();
   const configArgIndex = process.argv.indexOf("--config");
   const configPath = path.resolve(
     configArgIndex >= 0 && process.argv[configArgIndex + 1]
@@ -402,9 +434,15 @@ async function main() {
     }
   }
 
+  const runFinishedAt = new Date();
+  const runDurationMs = Number(process.hrtime.bigint() - runStartedHrTime) / 1_000_000;
+
   console.log(`\n========================================`);
   console.log(`EXPERIMENT SUMMARY`);
   console.log(`========================================`);
+  console.log(`Started: ${formatTimestamp(runStartedAt)}`);
+  console.log(`Finished: ${formatTimestamp(runFinishedAt)}`);
+  console.log(`Duration: ${formatDuration(runDurationMs)}`);
   console.log(`Total experiments: ${successfulExperiments.length + failedExperiments.length}`);
   console.log(`Successful: ${successfulExperiments.length}`);
   console.log(`Failed: ${failedExperiments.length}`);
