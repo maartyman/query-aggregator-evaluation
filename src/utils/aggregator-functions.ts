@@ -381,7 +381,9 @@ async function drainResponse(response: Response): Promise<void> {
 }
 
 export async function waitForAggregatorService(auth: Auth, serviceId: string, expectedBindings: number | null = 0): Promise<void> {
-  const timeoutMs = 120_000;
+  const timeoutMs = expectedBindings === null
+    ? 120_000
+    : Math.max(120_000, expectedBindings * 5_000);
   const pollMs = 500;
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;

@@ -16,7 +16,7 @@ import (
 var client = &http.Client{} // restored global HTTP client
 var solidAuth *SolidAuth    // restored global SolidAuth instance
 
-const maxConcurrentRequestsPerEndpoint = 30
+const maxConcurrentRequestsPerEndpoint = 10
 
 type endpointThrottler struct {
 	mu         sync.Mutex
@@ -197,8 +197,15 @@ func gatherClaims(existing []claimToken, required []requiredClaim) ([]claimToken
 			if len(resourceScopes) == 0 {
 				resourceScopes = rc.Details.ResourceScopes
 			}
+			if issuer == "" || resourceID == "" || len(resourceScopes) == 0 {
+				return nil, fmt.Errorf("access_token claim requires issuer, resource id, and scopes")
+			}
+			config, err := fetchUMA2Config(issuer)
+			if err != nil {
+				return nil, err
+			}
 			perm := []permission{{ResourceID: resourceID, ResourceScopes: resourceScopes}}
-			at, _, _, _, _, err := fetchAccessToken(strings.TrimSuffix(issuer, "/")+"/token", perm, nil)
+			at, _, _, _, _, err := fetchAccessToken(config.TokenEndpoint, perm, nil)
 			if err != nil {
 				return nil, err
 			}

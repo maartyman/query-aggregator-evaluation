@@ -116,8 +116,14 @@ async function listSeededAccountsMissingPat(serverDataPath: string): Promise<str
 
   const missing: string[] = [];
   for (const file of accountFiles) {
-    const content = await fs.readFile(path.join(accountsDataDir, file), "utf8");
-    const account = JSON.parse(content).payload as { authzServer?: string; asToken?: unknown };
+    let account: { authzServer?: string; asToken?: unknown };
+    try {
+      const content = await fs.readFile(path.join(accountsDataDir, file), "utf8");
+      account = JSON.parse(content).payload as { authzServer?: string; asToken?: unknown };
+    } catch {
+      missing.push(file);
+      continue;
+    }
     if (account.authzServer && !account.asToken) {
       missing.push(file);
     }

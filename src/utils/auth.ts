@@ -51,7 +51,7 @@ export class Auth {
   private accessToken: string | undefined;
   private trustflowsAuth: TrustflowsAuth | undefined;
   private activeRequests = 0;
-  private readonly maxConcurrentRequests = 30;
+  private readonly maxConcurrentRequests = 10;
   private requestQueue: Array<() => void> = [];
   private derivationClaimRequestCount = 0;
 
