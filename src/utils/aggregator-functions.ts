@@ -1,9 +1,14 @@
 import {Auth} from "./auth";
+import {ExperimentResult, type PhaseTiming} from "./result-builder";
 const aggregatorUrl = "http://localhost:5000/";
 const aggregatorUmaIssuer = "http://localhost:4000/uma";
 const availableServiceRel = "https://w3id.org/aggregator#availableService";
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type FetchClient = Auth | FetchLike;
+export interface TimedAggregatorResult {
+  json: any;
+  phaseTimings: PhaseTiming[];
+}
 
 function getFetch(client: FetchClient): FetchLike {
   return typeof client === "function" ? client : client.fetch.bind(client);
@@ -18,15 +23,15 @@ export async function createAggregatorService(auth: Auth, FnoDescription: string
     body: FnoDescription,
   });
   if (!response.ok) {
-  throw new Error(`Failed to configure aggregator: ${await response.text()}`);
-}
-const id = (await response.json()).id;
-await auth.createUmaPolicyForTargets([
-  `${aggregatorUrl}${id}`,
-  `${aggregatorUrl}${id}/`,
-  `${aggregatorUrl}config/actors/${id}`,
-], aggregatorUmaIssuer);
-return id;
+    throw new Error(`Failed to configure aggregator: ${await response.text()}`);
+  }
+  const id = (await response.json()).id;
+  await auth.createUmaPolicyForTargets([
+    `${aggregatorUrl}${id}`,
+    `${aggregatorUrl}${id}/`,
+    `${aggregatorUrl}config/actors/${id}`,
+  ], aggregatorUmaIssuer);
+  return id;
 }
 
 export async function registerAggregatorServiceDescription(auth: Auth, FnoDescription: string): Promise<string> {
@@ -44,17 +49,49 @@ export async function registerAggregatorServiceDescription(auth: Auth, FnoDescri
 }
 
 export async function getAggregatorService(client: FetchClient, serviceId: string): Promise<any> {
+  return (await getAggregatorServiceWithTimings(client, serviceId)).json;
+}
+
+export async function getAggregatorServiceWithTimings(client: FetchClient, serviceId: string): Promise<TimedAggregatorResult> {
   const fetchService = getFetch(client);
+  const phaseTimings: PhaseTiming[] = [];
+  let cumulativeMs = 0;
+  const outputFetchStart = process.hrtime();
   const response = await fetchService(`${aggregatorUrl}${serviceId}/`, {
     method: "GET",
     headers: {
       "Accept": "application/sparql-results+json"
     }
   });
+  const outputFetchMs = ExperimentResult.millisecondsSince(outputFetchStart);
+  const authTiming = client instanceof Auth ? client.consumeLastFetchTiming() : undefined;
+  const authMs = authTiming?.authDurationMs ?? 0;
+  const fetchWithoutAuthMs = Math.max(0, outputFetchMs - authMs);
+  cumulativeMs += fetchWithoutAuthMs;
+  phaseTimings.push({
+    label: "Fetch output location from service description",
+    durationMs: fetchWithoutAuthMs,
+    cumulativeMs,
+  });
+  cumulativeMs += authMs;
+  phaseTimings.push({
+    label: "Auth",
+    durationMs: authMs,
+    cumulativeMs,
+  });
   if (!response.ok) {
-  throw new Error(`Failed to get aggregator. status: ${response.status}, body: ${await response.text()}`);
-}
-return await response.json();
+    throw new Error(`Failed to get aggregator. status: ${response.status}, body: ${await response.text()}`);
+  }
+  const bodyStart = process.hrtime();
+  const json = await response.json();
+  const bodyMs = ExperimentResult.millisecondsSince(bodyStart);
+  cumulativeMs += bodyMs;
+  phaseTimings.push({
+    label: "Receive JSON result body",
+    durationMs: bodyMs,
+    cumulativeMs,
+  });
+  return { json, phaseTimings };
 }
 
 export async function getDiscoveredAggregatorService(
@@ -62,18 +99,55 @@ export async function getDiscoveredAggregatorService(
   sources: string[],
   queryString: string
 ): Promise<any> {
+  return (await getDiscoveredAggregatorServiceWithTimings(client, sources, queryString)).json;
+}
+
+export async function getDiscoveredAggregatorServiceWithTimings(
+  client: FetchClient,
+  sources: string[],
+  queryString: string
+): Promise<TimedAggregatorResult> {
   const fetchService = getFetch(client);
+  const phaseTimings: PhaseTiming[] = [];
+  let cumulativeMs = 0;
+  const discoveryStart = process.hrtime();
   const service = await discoverAggregatorService(client, sources, queryString);
+  const discoveryMs = ExperimentResult.millisecondsSince(discoveryStart);
+  cumulativeMs += discoveryMs;
+  phaseTimings.push({
+    label: "Discover the correct service",
+    durationMs: discoveryMs,
+    cumulativeMs,
+  });
+  const outputFetchStart = process.hrtime();
   const response = await fetchService(service.outputUrl, {
     method: "GET",
     headers: {
       "Accept": "application/sparql-results+json"
     }
   });
+  const outputFetchMs = ExperimentResult.millisecondsSince(outputFetchStart);
+  const authTiming = client instanceof Auth ? client.consumeLastFetchTiming() : undefined;
+  const authMs = authTiming?.authDurationMs ?? 0;
+  cumulativeMs += authMs;
+  phaseTimings.push({
+    label: "Auth",
+    durationMs: authMs,
+    cumulativeMs,
+  });
   if (!response.ok) {
     throw new Error(`Failed to get discovered aggregator service. service: ${service.descriptionUrl}, status: ${response.status}, body: ${await response.text()}`);
   }
-  return await response.json();
+  const bodyStart = process.hrtime();
+  const json = await response.json();
+  const bodyMs = ExperimentResult.millisecondsSince(bodyStart) + Math.max(0, outputFetchMs - authMs);
+  cumulativeMs += bodyMs;
+  phaseTimings.push({
+    label: "Receive JSON result body",
+    durationMs: bodyMs,
+    cumulativeMs,
+  });
+  return { json, phaseTimings };
 }
 
 export async function discoverAggregatorService(

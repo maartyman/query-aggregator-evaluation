@@ -1,4 +1,5 @@
 import { ActivityRDFRead } from "./activityRDFRead";
+import type {ActivityAggregatorOptions} from "./activityRDFRead";
 import { AsyncIterator } from "asynciterator";
 import { Activity } from "./elevate-types";
 import { Auth } from "../../utils/auth";
@@ -23,7 +24,7 @@ export class ActivityDao {
     type?: "select" | "count" | "ask";
     auth?: Auth;
     fetch?: typeof fetch;
-    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean; descriptionOnly?: boolean; discover?: boolean; expectedBindings?: number | null };
+    aggregator?: ActivityAggregatorOptions;
   }): Promise<AsyncIterator<any> | Activity[] | number> {
     const sources = options?.sources
     if (sources === undefined || sources.length === 0) {
@@ -43,14 +44,7 @@ export class ActivityDao {
       auth?: Auth;
       fetch?: typeof fetch;
       debugQuery?: (query: string) => void;
-      aggregator?: {
-        enabled: boolean;
-        podContext: any;
-        enableCache: boolean;
-        descriptionOnly?: boolean;
-        discover?: boolean;
-        expectedBindings?: number | null;
-      }
+      aggregator?: ActivityAggregatorOptions;
     }
   ): Promise<AsyncIterator<any> | Activity[] | number> {
     const activityIri = typeof id === 'string' ? id : String(id);
@@ -81,7 +75,7 @@ export class ActivityDao {
     filterKeys?: { key: string; relationKeyToValue: string; value: string | number | boolean | Date }[];
     auth?: Auth;
     fetch?: typeof fetch;
-    aggregator?: { enabled: boolean; podContext: any; enableCache: boolean; descriptionOnly?: boolean; discover?: boolean; expectedBindings?: number | null };
+    aggregator?: ActivityAggregatorOptions;
   }): Promise<number> {
     const sources = options?.sources
     if (sources === undefined || sources.length === 0) {

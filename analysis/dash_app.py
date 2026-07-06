@@ -13,7 +13,7 @@ from results_data import (
 )
 
 
-summary_df, aggregates_df, validation = load_or_build_dataframes()
+summary_df, aggregates_df, phase_aggregates_df, validation = load_or_build_dataframes()
 
 DEFAULT_EXPERIMENTS = sorted(aggregates_df["experimentName"].dropna().unique())
 DEFAULT_AUTHORIZATION_MODES = sorted(
@@ -61,6 +61,7 @@ app.layout = html.Div(
             [
                 html.Div([html.Strong("Result files"), html.Div(f"{len(summary_df):,}")]),
                 html.Div([html.Strong("Aggregate rows"), html.Div(f"{len(aggregates_df):,}")]),
+                html.Div([html.Strong("Phase rows"), html.Div(f"{len(phase_aggregates_df):,}")]),
                 html.Div([html.Strong("Validation"), html.Div("OK" if validation["ok"] else "FAILED")]),
                 html.Div(
                     [
@@ -69,7 +70,7 @@ app.layout = html.Div(
                     ]
                 ),
             ],
-            style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)", "gap": "12px"},
+            style={"display": "grid", "gridTemplateColumns": "repeat(5, 1fr)", "gap": "12px"},
         ),
         html.Div(
             [
@@ -131,6 +132,7 @@ app.layout = html.Div(
         dcc.Tabs(
             [
                 dcc.Tab(label="Duration", children=[dcc.Graph(id="duration-chart")]),
+                dcc.Tab(label="Execution phases", children=[dcc.Graph(id="phase-timing-chart")]),
                 dcc.Tab(
                     label="Request scaling",
                     children=[
@@ -208,6 +210,15 @@ def filtered_frames(experiments, authorization_modes, execution_types):
         & summary_df["authorizationMode"].isin(authorization_modes)
         & summary_df["executionType"].isin(execution_types)
     )
+    if phase_aggregates_df.empty:
+        filtered_phases = phase_aggregates_df.copy()
+    else:
+        phase_filter = (
+            phase_aggregates_df["experimentName"].isin(experiments)
+            & phase_aggregates_df["authorizationMode"].isin(authorization_modes)
+            & phase_aggregates_df["executionType"].isin(execution_types)
+        )
+        filtered_phases = phase_aggregates_df[phase_filter].copy()
     filtered_aggregates = aggregates_df[aggregate_filter].copy()
     filtered_summary = summary_df[summary_filter].copy()
     filtered_aggregates["iterationSort"] = filtered_aggregates["iterationArgs"].map(x_sort_key)
@@ -215,11 +226,19 @@ def filtered_frames(experiments, authorization_modes, execution_types):
     filtered_aggregates = filtered_aggregates.sort_values(
         ["experimentName", "authorizationMode", "iterationName", "iterationSort", "variantSort"]
     )
-    return filtered_summary, filtered_aggregates
+    if not filtered_phases.empty:
+        filtered_phases["iterationSort"] = filtered_phases["iterationArgs"].map(x_sort_key)
+        filtered_phases["variantSort"] = filtered_phases["variant"].map(variant_sort_key)
+        filtered_phases["phaseFacet"] = filtered_phases["experimentName"] + " / " + filtered_phases["variant"]
+        filtered_phases = filtered_phases.sort_values(
+            ["experimentName", "authorizationMode", "iterationName", "iterationSort", "variantSort", "phaseOrder"]
+        )
+    return filtered_summary, filtered_aggregates, filtered_phases
 
 
 @app.callback(
     Output("duration-chart", "figure"),
+    Output("phase-timing-chart", "figure"),
     Output("auth-request-scaling-chart", "figure"),
     Output("resource-request-scaling-chart", "figure"),
     Output("diefficiency-chart", "figure"),
@@ -234,7 +253,7 @@ def filtered_frames(experiments, authorization_modes, execution_types):
     Input("diefficiency-metric", "value"),
 )
 def update_views(experiments, authorization_modes, execution_types, y_min, y_max, diefficiency_metric):
-    _, filtered_aggregates = filtered_frames(
+    _, filtered_aggregates, filtered_phases = filtered_frames(
         experiments,
         authorization_modes,
         execution_types,
@@ -286,6 +305,52 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     )
     if axis_range is not None:
         duration_figure.update_yaxes(range=axis_range)
+    phase_order = []
+    if not filtered_phases.empty:
+        phase_order = [
+            label
+            for _, label in sorted(
+                {(int(row.phaseOrder), str(row.phaseLabel)) for row in filtered_phases.itertuples()},
+                key=lambda item: item,
+            )
+        ]
+    phase_figure = px.bar(
+        filtered_phases,
+        x="iterationArgs",
+        y="medianPhaseDurationMs",
+        color="phaseLabel",
+        facet_row="phaseFacet" if "phaseFacet" in filtered_phases else None,
+        facet_col="authorizationMode",
+        category_orders={
+            "authorizationMode": facet_authorization_order,
+            "iterationArgs": sorted(filtered_phases["iterationArgs"].unique(), key=x_sort_key)
+            if not filtered_phases.empty else [],
+            "phaseLabel": phase_order,
+        },
+        hover_data={
+            "phaseLabel": True,
+            "experimentName": True,
+            "authorizationMode": True,
+            "iterationName": True,
+            "iterationArgs": True,
+            "variant": True,
+            "runs": True,
+            "medianPhaseDurationMs": ":.3f",
+            "averagePhaseDurationMs": ":.3f",
+            "medianPhaseCumulativeMs": ":.3f",
+        },
+        labels={
+            "iterationArgs": "Iteration argument",
+            "medianPhaseDurationMs": "Median phase duration (ms)",
+            "phaseLabel": "Phase",
+            "phaseFacet": "Experiment / variant",
+            "authorizationMode": "Authorization",
+            "medianPhaseCumulativeMs": "Median cumulative phase duration (ms)",
+        },
+    )
+    phase_figure.update_layout(barmode="stack")
+    if axis_range is not None:
+        phase_figure.update_yaxes(range=axis_range)
     auth_request_scaling_figure = px.line(
         filtered_aggregates,
         x="iterationArgs",
@@ -452,6 +517,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     ]
     return (
         duration_figure,
+        phase_figure,
         auth_request_scaling_figure,
         resource_request_scaling_figure,
         diefficiency_figure,

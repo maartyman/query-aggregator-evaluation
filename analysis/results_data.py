@@ -75,6 +75,22 @@ AGGREGATE_COLUMNS = [
     "averageDief10s",
 ]
 
+PHASE_COLUMNS = [
+    "experimentName",
+    "authorizationMode",
+    "iterationName",
+    "iterationArgs",
+    "executionType",
+    "cacheStrategy",
+    "variant",
+    "phaseLabel",
+    "phaseOrder",
+    "runs",
+    "medianPhaseDurationMs",
+    "averagePhaseDurationMs",
+    "medianPhaseCumulativeMs",
+]
+
 SUMMARY_DATAFRAME_COLUMNS = SUMMARY_COLUMNS + [
     "experimentId",
     "experimentType",
@@ -304,6 +320,7 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
                 "overallNumberOfTriples": int(number(parameters.get("overallNumberOfTriples", parameters.get("numberOfTriples", 0)))),
                 "warmupRuns": int(number(parameters.get("warmupRuns", 0))),
                 "recordedRuns": int(number(parameters.get("recordedRuns", 0))),
+                "phaseTimings": data.get("phaseTimings") or [],
             })
         )
     return rows
@@ -471,38 +488,124 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def load_dataframes(results_dir: Path = RESULTS_DIR) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def phase_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    phases = []
+    for row in rows:
+        collapsed: dict[str, dict[str, Any]] = {}
+        for index, phase in enumerate(row.get("phaseTimings") or []):
+            label = str(phase.get("label", ""))
+            if not label:
+                continue
+            phase_row = collapsed.setdefault(label, {
+                "phaseLabel": label,
+                "phaseOrder": int(number(phase.get("order", index))),
+                "phaseDurationMs": 0,
+            })
+            phase_row["phaseDurationMs"] += number(phase.get("durationMs"))
+
+        cumulative_ms = 0
+        for phase in sorted(collapsed.values(), key=lambda item: (item["phaseOrder"], item["phaseLabel"])):
+            cumulative_ms += phase["phaseDurationMs"]
+            phases.append({
+                "experimentName": row["experimentName"],
+                "authorizationMode": row["authorizationMode"],
+                "iterationName": row["iterationName"],
+                "iterationArgs": row["iterationArgs"],
+                "executionType": row["executionType"],
+                "cacheStrategy": row["cacheStrategy"],
+                "variant": variant_label(row["executionType"], row["cacheStrategy"]),
+                "measurementRun": row["measurementRun"],
+                "phaseLabel": phase["phaseLabel"],
+                "phaseOrder": phase["phaseOrder"],
+                "phaseDurationMs": phase["phaseDurationMs"],
+                "phaseCumulativeMs": cumulative_ms,
+            })
+    return phases
+
+
+def phase_aggregate_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row["experimentName"],
+        row["authorizationMode"],
+        row["iterationName"],
+        row["iterationArgs"],
+        row["executionType"],
+        row["cacheStrategy"],
+        row["phaseLabel"],
+        row["phaseOrder"],
+    )
+
+
+def aggregate_phases(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    aggregates = []
+    for _, group in group_by(phase_rows(rows), phase_aggregate_key).items():
+        sample = group[0]
+        durations = [row["phaseDurationMs"] for row in group]
+        cumulative = [row["phaseCumulativeMs"] for row in group]
+        aggregates.append({
+            "experimentName": sample["experimentName"],
+            "authorizationMode": sample["authorizationMode"],
+            "iterationName": sample["iterationName"],
+            "iterationArgs": sample["iterationArgs"],
+            "executionType": sample["executionType"],
+            "cacheStrategy": sample["cacheStrategy"],
+            "variant": sample["variant"],
+            "phaseLabel": sample["phaseLabel"],
+            "phaseOrder": sample["phaseOrder"],
+            "runs": len(group),
+            "medianPhaseDurationMs": round(median(durations), 3),
+            "averagePhaseDurationMs": round(mean(durations), 3),
+            "medianPhaseCumulativeMs": round(median(cumulative), 3),
+        })
+    return sorted(
+        aggregates,
+        key=lambda row: (
+            str(row["experimentName"]),
+            authorization_sort_key(str(row["authorizationMode"])),
+            x_sort_key(str(row["iterationArgs"])),
+            variant_sort_key(str(row["variant"])),
+            int(row["phaseOrder"]),
+        ),
+    )
+
+
+def load_dataframes(results_dir: Path = RESULTS_DIR) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     rows = load_results(results_dir)
     summary_df = normalize_frame(pd.DataFrame(rows, columns=SUMMARY_DATAFRAME_COLUMNS))
     aggregates_df = normalize_frame(pd.DataFrame(aggregate(rows), columns=AGGREGATE_COLUMNS))
+    phases_df = normalize_frame(pd.DataFrame(aggregate_phases(rows), columns=PHASE_COLUMNS))
     validation = validate(rows)
-    return summary_df, aggregates_df, validation
+    return summary_df, aggregates_df, phases_df, validation
 
 
-def load_or_build_dataframes(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def load_or_build_dataframes(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     summary_path = output_dir / "summary.csv"
     aggregates_path = output_dir / "aggregates.csv"
+    phases_path = output_dir / "phases.csv"
     validation_path = output_dir / "validation.json"
 
-    if summary_path.exists() and aggregates_path.exists() and validation_path.exists():
+    if summary_path.exists() and aggregates_path.exists() and phases_path.exists() and validation_path.exists():
         raw_summary_df = pd.read_csv(summary_path)
         raw_aggregates_df = pd.read_csv(aggregates_path)
+        raw_phases_df = pd.read_csv(phases_path)
         if (
             ("cacheStrategy" in raw_summary_df and raw_summary_df["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES).any())
             or ("cacheStrategy" in raw_aggregates_df and raw_aggregates_df["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES).any())
+            or ("cacheStrategy" in raw_phases_df and raw_phases_df["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES).any())
         ):
-            summary_df, aggregates_df, validation = write_outputs(results_dir, output_dir)
-            return summary_df, aggregates_df, validation
+            summary_df, aggregates_df, phases_df, validation = write_outputs(results_dir, output_dir)
+            return summary_df, aggregates_df, phases_df, validation
 
         summary_df = normalize_frame(raw_summary_df)
         aggregates_df = normalize_frame(raw_aggregates_df)
+        phases_df = normalize_frame(raw_phases_df)
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
-        if all(column in aggregates_df.columns for column in AGGREGATE_COLUMNS):
-            return summary_df, aggregates_df, validation
-        summary_df, aggregates_df, validation = write_outputs(results_dir, output_dir)
-        return summary_df, aggregates_df, validation
+        if all(column in aggregates_df.columns for column in AGGREGATE_COLUMNS) and all(column in phases_df.columns for column in PHASE_COLUMNS):
+            return summary_df, aggregates_df, phases_df, validation
+        summary_df, aggregates_df, phases_df, validation = write_outputs(results_dir, output_dir)
+        return summary_df, aggregates_df, phases_df, validation
 
-    return load_dataframes(results_dir)
+    return write_outputs(results_dir, output_dir)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
@@ -512,18 +615,21 @@ def write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> Non
         writer.writerows(rows)
 
 
-def write_outputs(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def write_outputs(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     rows = load_results(results_dir)
     aggregates = aggregate(rows)
+    phases = aggregate_phases(rows)
     validation = validate(rows)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(output_dir / "summary.csv", rows, SUMMARY_COLUMNS)
     write_csv(output_dir / "aggregates.csv", aggregates, AGGREGATE_COLUMNS)
+    write_csv(output_dir / "phases.csv", phases, PHASE_COLUMNS)
     (output_dir / "validation.json").write_text(json.dumps(validation, indent=2) + "\n", encoding="utf-8")
     return (
         normalize_frame(pd.DataFrame(rows, columns=SUMMARY_DATAFRAME_COLUMNS)),
         normalize_frame(pd.DataFrame(aggregates, columns=AGGREGATE_COLUMNS)),
+        normalize_frame(pd.DataFrame(phases, columns=PHASE_COLUMNS)),
         validation,
     )
 

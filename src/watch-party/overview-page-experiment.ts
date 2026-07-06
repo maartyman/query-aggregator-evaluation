@@ -8,8 +8,8 @@ import {AsyncIterator, UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
 import {
   createAggregatorService,
-  getAggregatorService,
-  getDiscoveredAggregatorService,
+  getAggregatorServiceWithTimings,
+  getDiscoveredAggregatorServiceWithTimings,
   waitForAggregatorService
 } from "../utils/aggregator-functions";
 import {ExperimentSetup, PodContext} from "../data-generator";
@@ -263,18 +263,20 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
               : new Auth(podContext, {enableCache: false});
             await auth?.init();
             await auth?.getAccessToken();
-            const serviceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
+            const serviceClient = auth ?? createMeasuredFetch();
 
             const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
+            const timedAggregatorResult = discover
+              ? await getDiscoveredAggregatorServiceWithTimings(serviceClient, [ messageContainer ], queryRooms)
+              : await getAggregatorServiceWithTimings(serviceClient, this.aggregatorIdStore.get(podContext.name)!);
 
             const aggregatorResult = await ExperimentResult.fromJson(
               podContext.name + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
-              discover
-                ? await getDiscoveredAggregatorService(serviceFetch, [ messageContainer ], queryRooms)
-                : await getAggregatorService(serviceFetch, this.aggregatorIdStore.get(podContext.name)!),
-              { setupHttpMetrics }
+              timedAggregatorResult.json,
+              { setupHttpMetrics },
+              timedAggregatorResult.phaseTimings
             );
             results.push(aggregatorResult);
 

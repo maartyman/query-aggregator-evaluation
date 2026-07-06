@@ -2,6 +2,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getHttpMetricsSnapshot, resetHttpMetrics, type HttpMetricsSnapshot } from './http-metrics';
 
+export interface PhaseTiming {
+  label: string;
+  durationMs: number;
+  cumulativeMs: number;
+}
+
 export class ExperimentResult {
   public experimentId: string;
   public totalDuration: number; // Total query duration in ms
@@ -10,6 +16,7 @@ export class ExperimentResult {
   public dief10s: number; // Diefficiency at 10 seconds
   public timestamps: [number, number][]; // [timestamp_ms, cumulative_count] pairs
   public totalResults: number;
+  public phaseTimings: PhaseTiming[];
   public parameters?: Record<string, any>;
 
   constructor(
@@ -20,6 +27,7 @@ export class ExperimentResult {
     dief10s: number,
     timestamps: [number, number][],
     totalResults: number,
+    phaseTimings: PhaseTiming[] = [],
     parameters?: Record<string, any>
   ) {
     this.experimentId = experimentId;
@@ -29,6 +37,7 @@ export class ExperimentResult {
     this.dief10s = dief10s;
     this.timestamps = timestamps;
     this.totalResults = totalResults;
+    this.phaseTimings = phaseTimings;
     this.parameters = parameters;
   }
 
@@ -49,6 +58,7 @@ export class ExperimentResult {
       obj.dief10s,
       obj.timestamps,
       obj.totalResults,
+      obj.phaseTimings ?? [],
       obj.parameters
     );
   }
@@ -105,20 +115,21 @@ export class ExperimentResult {
           const { setupHttpMetrics, ...cleanParameters } = parameters ?? {};
           const setupMetrics = setupHttpMetrics as HttpMetricsSnapshot | undefined;
           resolve(new ExperimentResult(
-          experimentId,
-          totalDuration,
-          this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
-          this.calculateDiefficiency(timestamps, [1,0]), // 1s
-          this.calculateDiefficiency(timestamps, [10,0]), // 10s
-          timestamps,
-          timestamps.length,
-          {
-            ...metrics,
-            ...ExperimentResult.setupMetricsParameters(metrics, setupMetrics),
-            queryResultCount: timestamps.length,
-            ...cleanParameters
-          }
-        ));
+            experimentId,
+            totalDuration,
+            this.calculateDiefficiency(timestamps, [0,100_000_000]), // 100ms
+            this.calculateDiefficiency(timestamps, [1,0]), // 1s
+            this.calculateDiefficiency(timestamps, [10,0]), // 10s
+            timestamps,
+            timestamps.length,
+            this.iteratorPhaseTimings(timestamps[0], totalDuration),
+            {
+              ...metrics,
+              ...ExperimentResult.setupMetricsParameters(metrics, setupMetrics),
+              queryResultCount: timestamps.length,
+              ...cleanParameters
+            }
+          ));
         }).catch(reject);
       });
 
@@ -136,7 +147,8 @@ export class ExperimentResult {
     experimentId: string,
     startTime: [number, number],
     jsonResult: any,
-    parameters?: Record<string, any>
+    parameters?: Record<string, any>,
+    phaseTimings?: PhaseTiming[]
   ): Promise<ExperimentResult> {
     const endTime = process.hrtime(startTime);
     const totalDuration = endTime[0] * 1000 + endTime[1] / 1_000_000;
@@ -162,6 +174,7 @@ export class ExperimentResult {
       this.calculateDiefficiency(timestamps, [10,0]), // 10s
       timestamps,
       timestamps.length,
+      phaseTimings ?? [],
       {
         ...metrics,
         ...ExperimentResult.setupMetricsParameters(metrics, setupMetrics),
@@ -174,6 +187,27 @@ export class ExperimentResult {
   public static startMeasurement(): [number, number] {
     resetHttpMetrics();
     return process.hrtime();
+  }
+
+  public static millisecondsSince(startTime: [number, number]): number {
+    const duration = process.hrtime(startTime);
+    return duration[0] * 1000 + duration[1] / 1_000_000;
+  }
+
+  private static iteratorPhaseTimings(firstTimestamp: [number, number], totalDuration: number): PhaseTiming[] {
+    const firstResultMs = firstTimestamp[0] * 1000 + firstTimestamp[1] / 1_000_000;
+    return [
+      {
+        label: "First result arrives",
+        durationMs: firstResultMs,
+        cumulativeMs: firstResultMs,
+      },
+      {
+        label: "Iterator finishes",
+        durationMs: Math.max(0, totalDuration - firstResultMs),
+        cumulativeMs: totalDuration,
+      },
+    ];
   }
 
   private static setupMetricsParameters(

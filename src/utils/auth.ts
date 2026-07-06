@@ -32,6 +32,11 @@ export interface ObservedHttpRequest {
   error?: string;
 }
 
+export interface AuthFetchTiming {
+  totalDurationMs: number;
+  authDurationMs: number;
+}
+
 type TrustflowsClientModule = typeof import('trustflows-client');
 
 let requestObserver: ((request: ObservedHttpRequest) => void) | undefined;
@@ -54,6 +59,7 @@ export class Auth {
   private readonly maxConcurrentRequests = 10;
   private requestQueue: Array<() => void> = [];
   private derivationClaimRequestCount = 0;
+  private lastFetchTiming: AuthFetchTiming | undefined;
 
   constructor(podContext: PodContext, options?: { enableCache?: boolean; cacheFilePath?: string }) {
     this.podContext = podContext;
@@ -259,6 +265,12 @@ export class Auth {
     return this.derivationClaimRequestCount;
   }
 
+  consumeLastFetchTiming(): AuthFetchTiming | undefined {
+    const timing = this.lastFetchTiming;
+    this.lastFetchTiming = undefined;
+    return timing;
+  }
+
   private requireTrustflowsAuth(): TrustflowsAuth {
     if (!this.trustflowsAuth) {
       throw new Error('Not initialized');
@@ -388,24 +400,40 @@ export class Auth {
     const trustflowsClient = await loadTrustflowsClient();
     const resourceUrl = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as Request).url);
     const method = init?.method || 'GET';
+    const fetchStart = process.hrtime.bigint();
+    let authDurationMs = 0;
     Logger.debug('Fetch start', { resourceUrl, method });
     auth.umaPermissionTokens.clear();
 
     const response = await this.throttledFetch(input, init);
     if (response.status !== 401) {
       Logger.debug('Resource accessible without auth, status', response.status);
+      this.lastFetchTiming = {
+        totalDurationMs: Number(process.hrtime.bigint() - fetchStart) / 1_000_000,
+        authDurationMs,
+      };
       return response;
     }
 
     const challenge = trustflowsClient.parseUmaAuthenticateHeader(response.headers);
     if (!challenge?.as_uri || !challenge.ticket) {
       Logger.debug('Missing or unsupported UMA challenge in 401 response', resourceUrl);
+      this.lastFetchTiming = {
+        totalDurationMs: Number(process.hrtime.bigint() - fetchStart) / 1_000_000,
+        authDurationMs,
+      };
       return response;
     }
     Logger.debug('Received UMA challenge for resource', resourceUrl, 'AS:', challenge.as_uri);
 
+    const authStart = process.hrtime.bigint();
     const tokenResult = await this.fetchUmaAccessToken(challenge);
+    authDurationMs = Number(process.hrtime.bigint() - authStart) / 1_000_000;
     if (!tokenResult) {
+      this.lastFetchTiming = {
+        totalDurationMs: Number(process.hrtime.bigint() - fetchStart) / 1_000_000,
+        authDurationMs,
+      };
       return response;
     }
 
@@ -413,7 +441,12 @@ export class Auth {
     headers.set('Authorization', `${tokenResult.token_type} ${tokenResult.access_token}`);
 
     Logger.debug('Retrying resource with new UMA token', resourceUrl);
-    return await this.throttledFetch(input, {...init, headers});
+    const retryResponse = await this.throttledFetch(input, {...init, headers});
+    this.lastFetchTiming = {
+      totalDurationMs: Number(process.hrtime.bigint() - fetchStart) / 1_000_000,
+      authDurationMs,
+    };
+    return retryResponse;
   }
 
   async sse(input: string, abortController: AbortController): Promise<EventEmitter> {

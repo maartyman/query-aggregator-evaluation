@@ -13,13 +13,24 @@ import {
 import { getAggregatorIdStore } from "../../utils/aggregator-id-store";
 import {
   createAggregatorService,
-  getDiscoveredAggregatorService,
-  getAggregatorService,
+  getAggregatorServiceWithTimings,
+  getDiscoveredAggregatorServiceWithTimings,
   registerAggregatorServiceDescription,
   waitForAggregatorService
 } from "../../utils/aggregator-functions";
 import { PodContext } from "../../data-generator";
 import { Auth } from "../../utils/auth";
+import type {PhaseTiming} from "../../utils/result-builder";
+
+export interface ActivityAggregatorOptions {
+  enabled: boolean;
+  podContext: PodContext;
+  enableCache: boolean;
+  descriptionOnly?: boolean;
+  discover?: boolean;
+  expectedBindings?: number | null;
+  phaseTimings?: PhaseTiming[];
+}
 
 export class ActivityRDFRead {
   private queryEngine: QueryEngine;
@@ -93,14 +104,7 @@ export class ActivityRDFRead {
       sort?: { key: string; ascending: boolean };
       slice?: { limit: number; offset?: number };
       type?: "select" | "count" | "ask";
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-        descriptionOnly?: boolean;
-        discover?: boolean;
-        expectedBindings?: number | null;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
       debugQuery?: (query: string) => void;
@@ -274,9 +278,11 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
       }
 
       // Get results from aggregator
-      const aggregatorResults = options.aggregator.discover
-        ? await getDiscoveredAggregatorService(options.auth, sources, query)
+      const timedAggregatorResults = options.aggregator.discover
+        ? await getDiscoveredAggregatorServiceWithTimings(options.auth, sources, query)
         : await this.queryViaAggregator(options.auth, query, sources, serviceKey, options.aggregator.expectedBindings);
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       // Return count directly if count query
       if (options.type === "count") {
@@ -639,11 +645,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
     activityId: string,
     sources: [string, ...string[]],
     options?: {
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
     }
@@ -722,13 +724,15 @@ ORDER BY ?lapIndex
       // Use aggregator path - directly convert to Lap[]
       const store = getAggregatorIdStore();
       const serviceKey = store.buildSubQueryKey(activityId, sources, "laps");
-      const aggregatorResults = await this.queryViaAggregator(
+      const timedAggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
         sources,
         serviceKey,
         null
       );
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
       const laps: Lap[] = bindings.map((binding: any) => {
@@ -810,11 +814,7 @@ ORDER BY ?lapIndex
     activityId: string,
     sources: [string, ...string[]],
     options?: {
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
     }
@@ -846,13 +846,15 @@ SELECT ?index WHERE {
       // Use aggregator path - directly convert to ActivityFlag[]
       const store = getAggregatorIdStore();
       const serviceKey = store.buildSubQueryKey(activityId, sources, "flags");
-      const aggregatorResults = await this.queryViaAggregator(
+      const timedAggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
         sources,
         serviceKey,
         null
       );
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
       const result: ActivityFlag[] = bindings.map((binding: any) => {
@@ -881,11 +883,7 @@ SELECT ?index WHERE {
     statId: string,
     sources: [string, ...string[]],
     options?: {
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
     }
@@ -905,13 +903,15 @@ ORDER BY ?peakDuration
       // Use aggregator path - directly convert to Peak[]
       const store = getAggregatorIdStore();
       const serviceKey = store.buildSubQueryKey(statId, sources, "peaks");
-      const aggregatorResults = await this.queryViaAggregator(
+      const timedAggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
         sources,
         serviceKey,
         null
       );
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
       const result: Peak[] = bindings.map((binding: any) => {
@@ -952,11 +952,7 @@ ORDER BY ?peakDuration
     statId: string,
     sources: [string, ...string[]],
     options?: {
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
     }
@@ -975,13 +971,15 @@ SELECT * WHERE {
       // Use aggregator path - directly convert to ZoneModel[]
       const store = getAggregatorIdStore();
       const serviceKey = store.buildSubQueryKey(statId, sources, "zones");
-      const aggregatorResults = await this.queryViaAggregator(
+      const timedAggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
         sources,
         serviceKey,
         null
       );
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
       let totalTime = 0;
@@ -1057,11 +1055,7 @@ SELECT * WHERE {
     statId: string,
     sources: [string, ...string[]],
     options?: {
-      aggregator?: {
-        enabled: boolean;
-        podContext: PodContext;
-        enableCache: boolean;
-      };
+      aggregator?: ActivityAggregatorOptions;
       auth?: Auth;
       fetch?: typeof fetch;
     }
@@ -1102,13 +1096,15 @@ ORDER BY ?zoneIndex
       // Use aggregator path - directly convert to ZoneModel[]
       const store = getAggregatorIdStore();
       const serviceKey = store.buildSubQueryKey(statId, sources, "zones");
-      const aggregatorResults = await this.queryViaAggregator(
+      const timedAggregatorResults = await this.queryViaAggregator(
         options.auth,
         queryString,
         sources,
         serviceKey,
         null
       );
+      options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
       const zones: ZoneModel[] = [];
@@ -1241,8 +1237,8 @@ _:Query
     sources: string[],
     serviceKey: string,
     expectedBindings: number | null = 0
-  ): Promise<any> {
+  ): Promise<{ json: any; phaseTimings: PhaseTiming[] }> {
     const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey, expectedBindings);
-    return await getAggregatorService(auth, serviceId);
+    return await getAggregatorServiceWithTimings(auth, serviceId);
   }
 }

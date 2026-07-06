@@ -2,6 +2,7 @@ import type {Experiment} from "../experiment";
 import {ExperimentSetup, PodContext} from "../data-generator";
 import {ActivityGeneratorOptions, ElevateDataGenerator, ComplexityMap} from "./generate-data-elevate";
 import {ExperimentResult} from "../utils/result-builder";
+import type {PhaseTiming} from "../utils/result-builder";
 import {Logger} from "../utils/logger";
 import {isMainThread, parentPort, Worker, workerData} from "worker_threads";
 import {Auth} from "../utils/auth";
@@ -311,6 +312,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             const activityUrl = `${this.podContext.baseUrl}/activities/${activityLocation}`;
             const activityIri = `${activityUrl}#activity`;
             const activityDao = new ActivityDao();
+            const phaseTimings: PhaseTiming[] = [];
 
             const activities = await activityDao.getById(activityIri, {
               aggregator: {
@@ -318,7 +320,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
                 podContext: this.podContext,
                 enableCache: false,
                 discover,
-                expectedBindings: 1
+                expectedBindings: 1,
+                phaseTimings
               },
               auth
             });
@@ -349,7 +352,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               {
                 setupHttpMetrics,
                 derivationClaimRequests: auth.getDerivationClaimRequestCount()
-              }
+              },
+              phaseTimings
             );
             results.push(aggregatorResult);
 

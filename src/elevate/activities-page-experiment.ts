@@ -2,6 +2,7 @@ import type {Experiment} from "../experiment";
 import {ExperimentSetup, PodContext} from "../data-generator";
 import {ActivityGeneratorOptions, ElevateDataGenerator, ComplexityMap} from "./generate-data-elevate";
 import {ExperimentResult} from "../utils/result-builder";
+import type {PhaseTiming} from "../utils/result-builder";
 import {Logger} from "../utils/logger";
 import {isMainThread, parentPort, Worker, workerData} from "worker_threads";
 import {Auth} from "../utils/auth";
@@ -433,6 +434,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             }
 
             const activityDao = new ActivityDao();
+            const phaseTimings: PhaseTiming[] = [];
             await activityDao.count({
               sources: activitySources,
               aggregator: {
@@ -440,7 +442,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
                 podContext: this.podContext,
                 enableCache: false,
                 discover,
-                expectedBindings: 1
+                expectedBindings: 1,
+                phaseTimings
               },
               auth
             });
@@ -455,7 +458,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
                 podContext: this.podContext,
                 enableCache: false,
                 discover,
-                expectedBindings: numberOfActivities
+                expectedBindings: numberOfActivities,
+                phaseTimings
               },
               auth
             });
@@ -483,7 +487,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
               aggregatorResultJson,
-              { setupHttpMetrics }
+              { setupHttpMetrics },
+              phaseTimings
             );
             results.push(aggregatorResult);
 
