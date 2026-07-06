@@ -28,12 +28,6 @@ const argv = yargs(hideBin(process.argv))
     description: 'Config file for the UMA server',
     default: './config/default.json'
   })
-  .option('backupFilePath', {
-    alias: 'f',
-    type: 'string',
-    description: 'Backup file path for the UMA server',
-    default: ''
-  })
   .option('resourceRegistrationAuthorizedWebId', {
     type: 'string',
     description: 'WebID that receives all registered scopes for every registered resource',
@@ -51,7 +45,6 @@ const launch = async () => {
   variables['urn:uma:variables:port'] = argv.port;
   variables['urn:uma:variables:baseUrl'] = argv.baseUrl;
   variables['urn:uma:variables:eyePath'] = 'eye';
-  variables['urn:uma:variables:backupFilePath'] = argv.backupFilePath;
   variables['urn:uma:variables:resourceRegistrationAuthorizedWebId'] = argv.resourceRegistrationAuthorizedWebId;
 
   const configPath = path.resolve(rootDir, argv.configLocation);

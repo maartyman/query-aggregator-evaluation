@@ -1,8 +1,29 @@
 import { ComponentsManager, IModuleState } from 'componentsjs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
-let cachedModuleState: IModuleState;
 
+const portNames = [
+  'Base',
+  'Demo',
+  'ODRL',
+  'OIDC',
+  'Policies',
+  'RegistrationPolicy',
+] as const;
+
+export function getPorts(name: typeof portNames[number]): [ number, number ] {
+  const idx = portNames.indexOf(name);
+  // Just in case something doesn't listen to the typings
+  if (idx < 0) {
+    throw new Error(`Unknown port name ${name}`);
+  }
+  // 6000 is a bad port, causing node v18+ to block fetch requests targeting such a URL
+  // https://fetch.spec.whatwg.org/#port-blocking
+  return [ 6000 + idx + 1, 6100 + idx + 1 ];
+}
+
+let cachedModuleState: IModuleState;
 /**
  * Returns a component instantiated from a Components.js configuration.
  */
@@ -33,10 +54,13 @@ export async function instantiateFromConfig(
 }
 
 export function getDefaultCssVariables(port: number, baseUrl?: string): Record<string, any> {
+  const rootFilePath = path.join(tmpdir(), `uma-css-test-${port}-${process.pid}-${Date.now()}`);
+
   return {
     'urn:solid-server:default:variable:baseUrl': baseUrl ?? `http://localhost:${port}/`,
     'urn:solid-server:default:variable:port': port,
     'urn:solid-server:default:variable:socket': null,
+    'urn:solid-server:default:variable:rootFilePath': rootFilePath,
     'urn:solid-server:default:variable:loggingLevel': 'off',
     'urn:solid-server:default:variable:showStackTrace': true,
     'urn:solid-server:default:variable:seedConfig': null,

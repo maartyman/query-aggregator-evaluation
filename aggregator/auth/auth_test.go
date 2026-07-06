@@ -37,7 +37,7 @@ func TestBuildPermissionsUsesAggregatorSpecScopes(t *testing.T) {
 	}{
 		{method: http.MethodGet, scope: string(ScopeRead)},
 		{method: http.MethodHead, scope: string(ScopeRead)},
-		{method: http.MethodPost, scope: string(ScopeCreate)},
+		{method: http.MethodPost, scope: string(ScopeWrite)},
 		{method: http.MethodPut, scope: string(ScopeWrite)},
 		{method: http.MethodPatch, scope: string(ScopeWrite)},
 		{method: http.MethodDelete, scope: string(ScopeDelete)},
@@ -158,7 +158,7 @@ func TestAuthorizeRequestReturnsUMATicketChallengeWhenScopeInsufficient(t *testi
 	}
 }
 
-func TestCheckPermissionAcceptsLegacyScopeAliases(t *testing.T) {
+func TestCheckPermissionAcceptsKnowsScopeAliases(t *testing.T) {
 	oldIndex := idIndex
 	idIndex = map[string]string{"http://aggregator.example/service": "uma-service"}
 	t.Cleanup(func() {
@@ -167,9 +167,9 @@ func TestCheckPermissionAcceptsLegacyScopeAliases(t *testing.T) {
 
 	ok := CheckPermission("http://aggregator.example/service", http.MethodGet, []Permission{{
 		ResourceID:     "uma-service",
-		ResourceScopes: []string{string(legacyScopeRead)},
+		ResourceScopes: []string{"urn:knows:uma:scopes:read"},
 	}})
 	if !ok {
-		t.Fatal("expected legacy read scope to be accepted")
+		t.Fatal("expected urn:knows read scope to be accepted")
 	}
 }

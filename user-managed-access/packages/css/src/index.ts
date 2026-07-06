@@ -13,6 +13,9 @@ export * from './http/output/metadata/UmaTicketMetadataWriter';
 
 export * from './identity/interaction/account/util/AccountSettings';
 export * from './identity/interaction/account/util/UmaAccountStore';
+export * from './identity/interaction/PatUpdateHandler';
+export * from './identity/PatSeedRegistrar';
+export * from './identity/PatUpdater';
 
 export * from './init/EmptyContainerInitializer';
 export * from './init/UmaSeededAccountInitializer';
@@ -20,6 +23,7 @@ export * from './init/UmaSeededAccountInitializer';
 export * from './server/middleware/JwksHandler';
 
 export * from './uma/ResourceRegistrar';
+export * from './uma/ScopeUtil';
 export * from './uma/UmaClient';
 
 export * from './util/OwnerUtil';

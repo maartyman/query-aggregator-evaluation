@@ -1,6 +1,8 @@
-import { ASYMMETRIC_CRYPTOGRAPHIC_ALGORITHM }
-  from '@solid/access-token-verifier/dist/constant/ASYMMETRIC_CRYPTOGRAPHIC_ALGORITHM';
-import { getLoggerFor, joinUrl } from '@solid/community-server';
+import {
+  ASYMMETRIC_CRYPTOGRAPHIC_ALGORITHM
+} from '@solid/access-token-verifier/dist/constant/ASYMMETRIC_CRYPTOGRAPHIC_ALGORITHM';
+import { joinUrl } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
 import { HttpHandler, HttpHandlerContext, HttpHandlerResponse } from '../util/http/models/HttpHandler';
 
 // eslint-disable no-unused-vars
@@ -19,13 +21,17 @@ export type OAuthConfiguration = {
   dpop_signing_alg_values_supported?: string[],
   response_types_supported?: ResponseType[]
   scopes_supported?: string[]
+  registration_endpoint?: string,
 }
 
 export type UmaConfiguration = OAuthConfiguration & {
   uma_profiles_supported: string[],
   resource_registration_endpoint: string,
+  resource_owner_assets_endpoint: string,
+  policy_management_endpoint: string,
   permission_endpoint: string,
-  introspection_endpoint: string
+  introspection_endpoint: string,
+  derivation_resource_registration_endpoint: string,
 }
 
 /**
@@ -66,9 +72,13 @@ export class ConfigRequestHandler extends HttpHandler {
       permission_endpoint: joinUrl(this.baseUrl, 'ticket'),
       introspection_endpoint: joinUrl(this.baseUrl, 'introspect'),
       resource_registration_endpoint: joinUrl(this.baseUrl, 'resources/'),
+      derivation_resource_registration_endpoint: joinUrl(this.baseUrl, 'resources/'),
+      resource_owner_assets_endpoint: joinUrl(this.baseUrl, 'resource-owner/assets'),
+      policy_management_endpoint: joinUrl(this.baseUrl, 'policies'),
       uma_profiles_supported: ['http://openid.net/specs/openid-connect-core-1_0.html#IDToken'],
       dpop_signing_alg_values_supported: [...ASYMMETRIC_CRYPTOGRAPHIC_ALGORITHM],
       response_types_supported: [ResponseType.Token],
+      registration_endpoint: joinUrl(this.baseUrl, 'reg/'),
     };
   }
 }

@@ -114,6 +114,7 @@ func main() {
 		}
 	}()
 	auth.InitSigning(serverMux)
+	auth.InitProtectionAPI(*webId)
 	InitializeKubernetes(serverMux)
 	startConfigurationEndpoint(serverMux)
 	SetupResourceRegistration()

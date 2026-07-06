@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -26,6 +29,8 @@ var AS_ISSUER = getEnv("AS_ISSUER", "http://localhost:4000/uma")
 var (
 	fetchTicketForIssuer = fetchTicket
 	verifyTicketForToken = VerifyTicket
+	protectionAPIToken   string
+	protectionAPIMu      sync.RWMutex
 )
 
 func getEnv(key, fallback string) string {
@@ -120,6 +125,7 @@ type UmaConfig struct {
 	permissionEndpoint           string
 	introspectionEndpoint        string
 	resourceRegistrationEndpoint string
+	registrationEndpoint         string
 }
 
 type Permission struct {
@@ -163,7 +169,17 @@ func fetchTicket(permissions map[string][]string, issuer string) (string, error)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := doSignedRequest(req)
+	protectionAPIMu.RLock()
+	pat := protectionAPIToken
+	protectionAPIMu.RUnlock()
+
+	var resp *http.Response
+	if pat != "" {
+		req.Header.Set("Authorization", pat)
+		resp, err = httpclient.DefaultClient.Do(req)
+	} else {
+		resp, err = doSignedRequest(req)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -584,8 +600,109 @@ func fetchUmaConfig(issuer string) (UmaConfig, error) {
 			}
 		}
 	}
+	if val, ok := configuration["registration_endpoint"].(string); ok {
+		umaConfig.registrationEndpoint = val
+	}
 
 	return umaConfig, nil
+}
+
+func InitProtectionAPI(webID string) {
+	webID = strings.TrimSpace(webID)
+	if webID == "" {
+		logrus.Warn("Skipping UMA protection API bootstrap: missing WebID")
+		return
+	}
+	token, err := createProtectionAPIToken(webID)
+	if err != nil {
+		logrus.WithError(err).Warn("Failed to bootstrap UMA protection API token")
+		return
+	}
+	protectionAPIMu.Lock()
+	protectionAPIToken = token
+	protectionAPIMu.Unlock()
+	logrus.Info("UMA protection API token bootstrapped")
+}
+
+func createProtectionAPIToken(webID string) (string, error) {
+	config, err := fetchUmaConfig(AS_ISSUER)
+	if err != nil {
+		return "", err
+	}
+	if config.registrationEndpoint == "" {
+		return "", errors.New("UMA configuration missing registration_endpoint")
+	}
+
+	clientURI, err := randomClientURI()
+	if err != nil {
+		return "", err
+	}
+	registrationBody, err := json.Marshal(map[string]string{"client_uri": clientURI})
+	if err != nil {
+		return "", err
+	}
+	registrationRequest, err := http.NewRequest("POST", config.registrationEndpoint, bytes.NewBuffer(registrationBody))
+	if err != nil {
+		return "", err
+	}
+	registrationRequest.Header.Set("Authorization", "WebID "+url.QueryEscape(webID))
+	registrationRequest.Header.Set("Content-Type", "application/json")
+	registrationResponse, err := httpclient.DefaultClient.Do(registrationRequest)
+	if err != nil {
+		return "", err
+	}
+	defer registrationResponse.Body.Close()
+	if registrationResponse.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(registrationResponse.Body)
+		return "", fmt.Errorf("UMA client registration failed: status %d body %s", registrationResponse.StatusCode, string(body))
+	}
+	var registration struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if err := json.NewDecoder(registrationResponse.Body).Decode(&registration); err != nil {
+		return "", err
+	}
+	if registration.ClientID == "" || registration.ClientSecret == "" {
+		return "", errors.New("UMA client registration response missing credentials")
+	}
+
+	form := "grant_type=client_credentials&scope=uma_protection"
+	tokenRequest, err := http.NewRequest("POST", config.issuer+"/token", strings.NewReader(form))
+	if err != nil {
+		return "", err
+	}
+	authString := url.QueryEscape(registration.ClientID) + ":" + url.QueryEscape(registration.ClientSecret)
+	tokenRequest.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(authString)))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResponse, err := httpclient.DefaultClient.Do(tokenRequest)
+	if err != nil {
+		return "", err
+	}
+	defer tokenResponse.Body.Close()
+	if tokenResponse.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(tokenResponse.Body)
+		return "", fmt.Errorf("UMA PAT request failed: status %d body %s", tokenResponse.StatusCode, string(body))
+	}
+	var token struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.NewDecoder(tokenResponse.Body).Decode(&token); err != nil {
+		return "", err
+	}
+	if token.AccessToken == "" || token.TokenType == "" {
+		return "", errors.New("UMA PAT response missing token")
+	}
+	return token.TokenType + " " + token.AccessToken, nil
+}
+
+func randomClientURI() (string, error) {
+	randomBytes := make([]byte, 16)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return HTTP_SIGNATURE_CREDENTIAL + "/client/" + hex.EncodeToString(randomBytes), nil
 }
 
 var idIndex = make(map[string]string)
@@ -594,25 +711,16 @@ var idIndex = make(map[string]string)
 type ResourceScope string
 
 const (
-	ScopeRead               ResourceScope = "urn:knows:uma:scopes:read"
-	ScopeAppend             ResourceScope = "urn:knows:uma:scopes:append"
-	ScopeCreate             ResourceScope = "urn:knows:uma:scopes:create"
-	ScopeDelete             ResourceScope = "urn:knows:uma:scopes:delete"
-	ScopeWrite              ResourceScope = "urn:knows:uma:scopes:write"
-	ScopeContinuousRead     ResourceScope = "urn:knows:uma:scopes:continuous:read"
-	ScopeContinuousWrite    ResourceScope = "urn:knows:uma:scopes:continuous:write"
-	ScopeContinuousDuplex   ResourceScope = "urn:knows:uma:scopes:continuous:duplex"
+	ScopeRead               ResourceScope = "urn:example:css:modes:read"
+	ScopeAppend             ResourceScope = "urn:example:css:modes:append"
+	ScopeCreate             ResourceScope = "urn:example:css:modes:create"
+	ScopeDelete             ResourceScope = "urn:example:css:modes:delete"
+	ScopeWrite              ResourceScope = "urn:example:css:modes:write"
+	ScopeContinuousRead     ResourceScope = "urn:example:css:modes:continuous:read"
+	ScopeContinuousWrite    ResourceScope = "urn:example:css:modes:continuous:write"
+	ScopeContinuousDuplex   ResourceScope = "urn:example:css:modes:continuous:duplex"
 	ScopeDerivationCreation ResourceScope = "urn:knows:uma:scopes:derivation-creation"
 	ScopeDerivationRead     ResourceScope = "urn:knows:uma:scopes:derivation-read"
-
-	legacyScopeRead             ResourceScope = "urn:example:css:modes:read"
-	legacyScopeAppend           ResourceScope = "urn:example:css:modes:append"
-	legacyScopeCreate           ResourceScope = "urn:example:css:modes:create"
-	legacyScopeDelete           ResourceScope = "urn:example:css:modes:delete"
-	legacyScopeWrite            ResourceScope = "urn:example:css:modes:write"
-	legacyScopeContinuousRead   ResourceScope = "urn:example:css:modes:continuous:read"
-	legacyScopeContinuousWrite  ResourceScope = "urn:example:css:modes:continuous:write"
-	legacyScopeContinuousDuplex ResourceScope = "urn:example:css:modes:continuous:duplex"
 )
 
 func CreateResource(resourceId string, resourceScopes []ResourceScope, resourceRelations interface{}) error {
@@ -671,7 +779,17 @@ func CreateResource(resourceId string, resourceScopes []ResourceScope, resourceR
 	}
 	logrus.WithFields(logrus.Fields{"action": action, "resource_id": resourceId, "endpoint": endpoint}).Info("Processing UMA resource registration")
 
-	res, err := doSignedRequest(req)
+	protectionAPIMu.RLock()
+	pat := protectionAPIToken
+	protectionAPIMu.RUnlock()
+
+	var res *http.Response
+	if pat != "" {
+		req.Header.Set("Authorization", pat)
+		res, err = httpclient.DefaultClient.Do(req)
+	} else {
+		res, err = doSignedRequest(req)
+	}
 	if err != nil {
 		logrus.WithFields(logrus.Fields{"err": err, "resource_id": resourceId, "endpoint": endpoint}).Error("Error while making UMA request")
 		return err
@@ -686,12 +804,12 @@ func CreateResource(resourceId string, resourceScopes []ResourceScope, resourceR
 	if knownUmaId != "" {
 		if res.StatusCode != http.StatusOK {
 			logrus.WithFields(logrus.Fields{"status": res.Status, "body": string(body), "resource_id": resourceId}).Error("Resource update request failed")
-			return nil
+			return fmt.Errorf("resource update request failed: status %s body %s", res.Status, string(body))
 		}
 	} else {
 		if res.StatusCode != http.StatusCreated {
 			logrus.WithFields(logrus.Fields{"status": res.Status, "body": string(body), "resource_id": resourceId}).Error("Resource registration request failed")
-			return nil
+			return fmt.Errorf("resource registration request failed: status %s body %s", res.Status, string(body))
 		}
 		var responseData struct {
 			ID string `json:"_id"`
@@ -845,7 +963,7 @@ func BuildPermissions(resourceURL, method string) Permission {
 	case http.MethodGet, http.MethodHead:
 		scopes = []string{string(ScopeRead)}
 	case http.MethodPost:
-		scopes = []string{string(ScopeCreate)}
+		scopes = []string{string(ScopeWrite)}
 	case http.MethodPut, http.MethodPatch:
 		scopes = []string{string(ScopeWrite)}
 	case http.MethodDelete:
@@ -893,8 +1011,8 @@ func CheckPermission(resourceURL, method string, permission []Permission) bool {
 				}
 				break
 			case http.MethodPost:
-				logrus.WithFields(logrus.Fields{"method": method}).Debug("🔧 Checking for 'create' scope")
-				if hasScope(perm.ResourceScopes, ScopeCreate) {
+				logrus.WithFields(logrus.Fields{"method": method}).Debug("🔧 Checking for 'write' scope")
+				if hasScope(perm.ResourceScopes, ScopeWrite) {
 					logrus.Info("✅ Authorization successful - user has modify permissions")
 					return true
 				}
@@ -926,33 +1044,9 @@ func hasScope(scopes []string, required ResourceScope) bool {
 	if contains(scopes, string(required)) {
 		return true
 	}
-	for _, alias := range legacyAliases(required) {
-		if contains(scopes, string(alias)) {
-			return true
-		}
-	}
-	return false
+	return contains(scopes, knowsAlias(required))
 }
 
-func legacyAliases(scope ResourceScope) []ResourceScope {
-	switch scope {
-	case ScopeRead:
-		return []ResourceScope{legacyScopeRead}
-	case ScopeAppend:
-		return []ResourceScope{legacyScopeAppend}
-	case ScopeCreate:
-		return []ResourceScope{legacyScopeCreate}
-	case ScopeDelete:
-		return []ResourceScope{legacyScopeDelete}
-	case ScopeWrite:
-		return []ResourceScope{legacyScopeWrite}
-	case ScopeContinuousRead:
-		return []ResourceScope{legacyScopeContinuousRead}
-	case ScopeContinuousWrite:
-		return []ResourceScope{legacyScopeContinuousWrite}
-	case ScopeContinuousDuplex:
-		return []ResourceScope{legacyScopeContinuousDuplex}
-	default:
-		return nil
-	}
+func knowsAlias(scope ResourceScope) string {
+	return strings.Replace(string(scope), "urn:example:css:modes:", "urn:knows:uma:scopes:", 1)
 }

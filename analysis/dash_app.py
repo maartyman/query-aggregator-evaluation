@@ -289,7 +289,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     auth_request_scaling_figure = px.line(
         filtered_aggregates,
         x="iterationArgs",
-        y="medianAuthorizationTokenRequests",
+        y="medianOverallAuthorizationTokenRequests",
         color="variant",
         facet_row="experimentName",
         facet_col="authorizationMode",
@@ -316,11 +316,11 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
         },
         labels={
             "iterationArgs": "Iteration argument",
+            "medianOverallAuthorizationTokenRequests": "Overall median auth token requests",
             "medianAuthorizationTokenRequests": "Measured median auth token requests",
             "medianHttpRequests": "Measured median HTTP requests",
             "medianResourceRequests": "Measured median resource requests",
             "medianSetupAuthorizationTokenRequests": "Setup median auth token requests",
-            "medianOverallAuthorizationTokenRequests": "Overall median auth token requests",
             "medianDurationMs": "Median duration (ms)",
             "variant": "Variant",
             "authorizationMode": "Authorization",
@@ -462,4 +462,4 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
 
 
 if __name__ == "__main__":
-    app.run_server(debug=False, dev_tools_ui=False, dev_tools_props_check=False, port=8050)
+    app.run(debug=False, dev_tools_ui=False, dev_tools_props_check=False, port=8050)

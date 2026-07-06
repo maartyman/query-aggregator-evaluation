@@ -17,7 +17,6 @@ import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
-import {FileCacheFetch} from "../utils/file-cache-fetch";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
 const queryMessageLocations = `PREFIX ldp: <http://www.w3.org/ns/ldp#>
@@ -97,9 +96,8 @@ async function runQueriesInWorker(
   await auth?.getAccessToken();
   const engine = new QueryEngine();
   const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
-  const queryFetch = cache === "file-cache"
-    ? new FileCacheFetch(resourceFetch).fetch
-    : resourceFetch;
+  const queryFetch = resourceFetch;
+  const queryContext = { fetch: queryFetch };
 
   if (cache === "indexed-cache") {
     const store = new IndexedStore();
@@ -108,6 +106,7 @@ async function runQueriesInWorker(
 
     const rawMessageLocations = await (await engine.queryBindings(queryMessageLocations, {
       sources: [ store.get(messageContainer) ],
+      ...queryContext,
     }))
       .map((bindings) => bindings.get('messageLocations')!.value)
       .toArray();
@@ -116,6 +115,7 @@ async function runQueriesInWorker(
 
     const rawRoomLocations = await (await engine.queryBindings(queryMessageBoxes, {
       sources: store.getMany(messageLocations),
+      ...queryContext,
     }))
       .map((bindings) => bindings.get('roomUrl')!.value)
       .toArray();
@@ -126,14 +126,17 @@ async function runQueriesInWorker(
     const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryMessageLocations, {
       sources: [ store.get(messageContainer) ],
+      ...queryContext,
     }))
       .toArray()
     await (await engine.queryBindings(queryMessageBoxes, {
       sources: store.getMany(messageLocations),
+      ...queryContext,
     }))
       .toArray()
     const resultIterator: AsyncIterator<any> = await engine.queryBindings(queryRooms, {
       sources: store.getMany(roomLocations),
+      ...queryContext,
     });
 
     return await ExperimentResult.fromIterator(
@@ -144,36 +147,12 @@ async function runQueriesInWorker(
     );
   }
 
-  if (cache === "file-cache") {
-    const messageLocations = await (await engine.queryBindings(queryMessageLocations, {
-      sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
-      fetch: queryFetch
-    }))
-      .map((bindings) => bindings.get('messageLocations')!.value)
-      .toArray();
-
-    const roomLocations = new Set<string>();
-    for (const messageLocation of messageLocations) {
-      const rooms = await (await engine.queryBindings(queryMessageBoxes, {
-        sources: [messageLocation],
-        fetch: queryFetch
-      }))
-        .map((bindings) => bindings.get('roomUrl')!.value)
-        .toArray();
-      rooms.forEach(room => roomLocations.add(room));
-    }
-
-    await Promise.all([ ...roomLocations ].map(room =>
-      queryFetch(room, { headers: { Accept: "text/turtle" } })
-    ));
-  }
-
   const setupHttpMetrics = await getHttpMetricsSnapshot();
   const startTime = ExperimentResult.startMeasurement();
 
   const messageLocationsBindingsStream = await engine.queryBindings(queryMessageLocations, {
     sources: [`${podContext.baseUrl}/watchparties/myMessages/`],
-    fetch: queryFetch
+    ...queryContext,
   });
 
   let resultIterator: any;
@@ -182,7 +161,7 @@ async function runQueriesInWorker(
     transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
       push(await engine.queryBindings(queryMessageBoxes, {
         sources: [bindings.get('messageLocations')!.value],
-        fetch: queryFetch
+        ...queryContext,
       }));
       done();
     },
@@ -193,7 +172,7 @@ async function runQueriesInWorker(
         queryRooms,
         {
           sources: [room],
-          fetch: queryFetch
+          ...queryContext,
         }
       ));
       done();
@@ -217,7 +196,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
-          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
+          for (const cache of ["no-cache", "indexed-cache"] as const) {
             Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
@@ -351,19 +330,20 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
   generate(): ExperimentSetup {
     this.removeGeneratedData();
+    const queryUsers: PodContext[] = [];
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
-        this.generateForOverviewPage(iteration.iterationName+"-"+arg.join("_"), arg[0]);
+        queryUsers.push(this.generateForOverviewPage(iteration.iterationName+"-"+arg.join("_"), arg[0]));
       }
     }
     const firstIteration = this.experimentConfig.iterations[0];
     const firstArg = firstIteration.args[0];
     const firstExperimentId = `${firstIteration.iterationName}-${firstArg.join("_")}`;
     const queryUserContext = this.getUserPodContext(this.queryUser, firstExperimentId);
-    return this.finalizeGeneration(queryUserContext);
+    return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
-  private generateForOverviewPage(experimentId: string, numberOfJoinedWatchparties: number) {
+  private generateForOverviewPage(experimentId: string, numberOfJoinedWatchparties: number): PodContext {
     const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
     const queryUserPodUrl = queryUserContext.baseUrl;
     const queryUserRelativePath = queryUserContext.relativePath;
@@ -411,6 +391,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
       fs.mkdirSync(path.dirname(queryableUserMessagesFilePath), { recursive: true });
       fs.writeFileSync(queryableUserMessagesFilePath, queryableUserMessagesTriples);
     }
+    return queryUserContext;
   }
 }
 

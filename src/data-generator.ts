@@ -30,6 +30,7 @@ export interface PodContext {
 
 export interface ExperimentSetup {
   queryUser: PodContext;
+  queryUsers: PodContext[];
   servers: ServerInstanceContext[];
 }
 
@@ -164,12 +165,13 @@ export class DataGenerator {
     return context;
   }
 
-  protected finalizeGeneration(queryUser: PodContext): ExperimentSetup {
+  protected finalizeGeneration(queryUser: PodContext, queryUsers: PodContext[] = [ queryUser ]): ExperimentSetup {
     for (const server of this.getServers()) {
       this.generateServerMetadata(server);
     }
     return {
       queryUser,
+      queryUsers,
       servers: this.getServers(),
     };
   }
@@ -192,7 +194,7 @@ export class DataGenerator {
       relativePath,
       absolutePath,
       solidBaseUrl: `http://localhost:${solidPort}/`,
-      umaBaseUrl: `http://localhost:${umaPort}/`,
+      umaBaseUrl: `http://localhost:${umaPort}/uma`
     };
 
     this.servers.set(index, context);
@@ -290,6 +292,7 @@ export class DataGenerator {
       payload: {
         linkedLoginsCount: 1,
         id: accountId,
+        authzServer: server.umaBaseUrl,
         '**password**': {
           [passwordId]: {
             accountId,

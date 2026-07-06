@@ -1,4 +1,4 @@
-import { HttpHandler, HttpHandlerInput } from '@solid/community-server';
+import { HttpHandler, type HttpHandlerInput } from '@solid/community-server';
 import { AggregatorDiscoveryStore } from './AggregatorDiscoveryStore';
 
 interface RegistrationBody {

@@ -1482,7 +1482,7 @@ func (data *ConfigurationData) deleteActor(response http.ResponseWriter, _ *http
 // Replace resourceScopes* slices with enum slices using auth.ResourceScope
 var resourceScopesRead = []auth.ResourceScope{auth.ScopeRead}
 var resourceScopesReadDelete = []auth.ResourceScope{auth.ScopeRead, auth.ScopeDelete}
-var resourceScopesReadCreate = []auth.ResourceScope{auth.ScopeRead, auth.ScopeCreate}
+var resourceScopesReadCreate = []auth.ResourceScope{auth.ScopeRead, auth.ScopeWrite}
 
 const hardcodedAvailableTransformations = `
 @base <http://localhost:5000/transformations#> .

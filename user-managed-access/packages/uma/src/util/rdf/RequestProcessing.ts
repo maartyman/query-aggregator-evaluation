@@ -8,10 +8,8 @@ import { Permission } from '../../views/Permission';
 export function switchODRLandCSSPermission(permission: string): string {
     if(permission.startsWith("urn:example:css:modes:")) {
         return permission.replace("urn:example:css:modes:", "https://w3id.org/oac#");
-    } else if(permission.startsWith("urn:knows:uma:scopes:")) {
-        return permission.replace("urn:knows:uma:scopes:", "https://w3id.org/oac#");
     } else if(permission.startsWith("https://w3id.org/oac#")) {
-        return permission.replace("https://w3id.org/oac#", "urn:knows:uma:scopes:");
+        return permission.replace("https://w3id.org/oac#", "urn:example:css:modes:");
     } else {
         throw new Error(`Permission ${permission} not recognized`)
     }

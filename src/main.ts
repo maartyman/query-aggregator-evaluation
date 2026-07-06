@@ -197,7 +197,7 @@ async function runExperiment(
     setup.servers,
     setup.queryUser,
     loggingOptions,
-    resourceRegistrationAuthorizedWebId
+    resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(",")
   );
 
   getAggregatorIdStore().clear();

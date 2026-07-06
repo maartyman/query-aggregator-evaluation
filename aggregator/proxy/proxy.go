@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"time"
 )
 
 // ProxyConfig holds the configuration for Solid OIDC authentication
@@ -34,6 +35,66 @@ func isPodRunning(clientset *kubernetes.Clientset) (bool, error) {
 	}
 
 	return false, nil
+}
+
+func runningPodMatchesConfig(clientset *kubernetes.Clientset, config ProxyConfig) (bool, error) {
+	pods, err := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", "uma-proxy"),
+	})
+	if err != nil {
+		return false, err
+	}
+
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != v1.PodRunning {
+			continue
+		}
+		if len(pod.Spec.Containers) == 0 {
+			return false, nil
+		}
+		env := map[string]string{}
+		for _, entry := range pod.Spec.Containers[0].Env {
+			env[entry.Name] = entry.Value
+		}
+		return env["WEBID"] == config.WebId &&
+			env["EMAIL"] == config.Email &&
+			env["PASSWORD"] == config.Password &&
+			env["LOG_LEVEL"] == config.LogLevel, nil
+	}
+
+	return false, nil
+}
+
+func deleteProxyPods(clientset *kubernetes.Clientset) error {
+	pods, err := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", "uma-proxy"),
+	})
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods.Items {
+		if err := clientset.CoreV1().Pods("default").Delete(context.Background(), pod.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func waitForProxyPodsDeleted(clientset *kubernetes.Clientset) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		pods, err := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("app=%s", "uma-proxy"),
+		})
+		if err != nil {
+			return err
+		}
+		if len(pods.Items) == 0 {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for old uma-proxy pod deletion")
 }
 
 func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
@@ -155,6 +216,20 @@ func createService(clientset *kubernetes.Clientset) error {
 }
 
 func SetupProxy(clientset *kubernetes.Clientset, config ProxyConfig) {
+	matchesConfig, err := runningPodMatchesConfig(clientset, config)
+	if err != nil {
+		panic(err)
+	}
+	if !matchesConfig {
+		logrus.Info("Recreating uma-proxy pod for current authentication configuration")
+		if err := deleteProxyPods(clientset); err != nil {
+			panic(err)
+		}
+		if err := waitForProxyPodsDeleted(clientset); err != nil {
+			panic(err)
+		}
+	}
+
 	if running, err := isPodRunning(clientset); err != nil || !running {
 		err := createPod(clientset, config)
 		if err != nil {

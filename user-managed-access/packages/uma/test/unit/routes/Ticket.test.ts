@@ -4,7 +4,9 @@ import { TicketRequestHandler } from '../../../src/routes/Ticket';
 import { TicketingStrategy } from '../../../src/ticketing/strategy/TicketingStrategy';
 import { Ticket } from '../../../src/ticketing/Ticket';
 import { HttpHandlerContext } from '../../../src/util/http/models/HttpHandler';
+import { RequestValidator } from '../../../src/util/http/validate/RequestValidator';
 import * as signatures from '../../../src/util/HttpMessageSignatures';
+import { RegistrationStore } from '../../../src/util/RegistrationStore';
 import { ResourceDescription } from '../../../src/views/ResourceDescription';
 
 vi.mock('node:crypto', () => ({
@@ -12,17 +14,22 @@ vi.mock('node:crypto', () => ({
 }));
 
 describe('Ticket', (): void => {
+  const owner = 'owner';
+  const ticket: Ticket = {
+    permissions: [{ resource_id: 'id', resource_scopes: [ 'scope' ] }],
+    provided: {},
+    required: [],
+  };
   let request: HttpHandlerContext;
-  const verifyRequest = vi.spyOn(signatures, 'verifyRequest');
 
   let ticketingStrategy: Mocked<TicketingStrategy>;
   let ticketStore: Mocked<KeyValueStorage<string, Ticket>>;
-  let resourceStore: Mocked<KeyValueStorage<string, ResourceDescription>>;
+  let registrationStore: Mocked<RegistrationStore>;
+  let validator: Mocked<RequestValidator>;
   let handler: TicketRequestHandler;
 
   beforeEach(async(): Promise<void> => {
     vi.clearAllMocks();
-    verifyRequest.mockResolvedValue(true);
 
     request = { request: { body: [{
       resource_id: 'id',
@@ -30,27 +37,25 @@ describe('Ticket', (): void => {
     }]}} as any;
 
     ticketingStrategy = {
-      initializeTicket: vi.fn().mockResolvedValue('ticket'),
+      initializeTicket: vi.fn().mockResolvedValue(ticket),
       resolveTicket: vi.fn(),
       validateClaims: vi.fn(),
     };
 
-    resourceStore = {
+    registrationStore = {
       has: vi.fn().mockResolvedValue(true),
+      get: vi.fn().mockResolvedValue({ owner, description: { resource_scopes: [ 'scope' ] } }),
     } satisfies Partial<KeyValueStorage<string, ResourceDescription>> as any;
 
     ticketStore = {
       set: vi.fn(),
     } satisfies Partial<KeyValueStorage<string, Ticket>> as any;
 
-    handler = new TicketRequestHandler(ticketingStrategy, ticketStore, resourceStore);
-  });
+    validator = {
+      handleSafe: vi.fn().mockResolvedValue({ owner }),
+    } satisfies Partial<RequestValidator> as any;
 
-  it('errors if the request is not authorized.', async(): Promise<void> => {
-    verifyRequest.mockResolvedValueOnce(false);
-    await expect(handler.handle(request)).rejects.toThrow(UnauthorizedHttpError);
-    expect(verifyRequest).toHaveBeenCalledTimes(1);
-    expect(verifyRequest).toHaveBeenLastCalledWith(request.request);
+    handler = new TicketRequestHandler(ticketingStrategy, ticketStore, registrationStore, validator);
   });
 
   it('throws an error if the body is invalid.', async(): Promise<void> => {
@@ -68,7 +73,39 @@ describe('Ticket', (): void => {
     ticketingStrategy.resolveTicket.mockResolvedValue({ success: false, value: [] });
     await expect(handler.handle(request)).resolves.toEqual({ status: 201, body: { ticket: '1-2-3-4-5' }});
     expect(ticketStore.set).toHaveBeenCalledTimes(1);
-    expect(ticketStore.set).toHaveBeenLastCalledWith('1-2-3-4-5', 'ticket');
+    expect(ticketStore.set).toHaveBeenLastCalledWith('1-2-3-4-5', ticket);
+  });
+
+  it('stores a ticket for derived resources even if policy resolution would otherwise succeed.', async(): Promise<void> => {
+    ticketingStrategy.resolveTicket.mockResolvedValue({ success: true, value: [] });
+    registrationStore.get.mockResolvedValueOnce({
+      owner,
+      description: {
+        resource_scopes: [ 'scope' ],
+        derived_from: [{
+          issuer: 'https://upstream.example/',
+          derivation_resource_id: 'handle-id-1',
+        }],
+      },
+    });
+
+    await expect(handler.handle(request)).resolves.toEqual({ status: 201, body: { ticket: '1-2-3-4-5' }});
+    expect(ticketingStrategy.resolveTicket).toHaveBeenCalledTimes(0);
+    expect(ticketStore.set).toHaveBeenCalledTimes(1);
+    expect(ticketStore.set).toHaveBeenLastCalledWith('1-2-3-4-5', {
+      permissions: [{ resource_id: 'id', resource_scopes: [ 'scope' ] }],
+      provided: {},
+      required: [{
+        'https://w3id.org/aggregator#derivation-access|https://upstream.example/|handle-id-1|scope': expect.any(Function),
+      }],
+      required_claims: [{
+        claim_type: 'https://w3id.org/aggregator#derivation-access',
+        claim_token_format: 'urn:ietf:params:oauth:token-type:access_token',
+        issuer: 'https://upstream.example/',
+        derivation_resource_id: 'handle-id-1',
+        resource_scopes: [ 'scope' ],
+      }],
+    });
   });
 
   it('returns with invalid_resource_id if one of the targets is unknown.', async(): Promise<void> => {
@@ -76,8 +113,8 @@ describe('Ticket', (): void => {
       { resource_id: 'id1', resource_scopes: [ 'scope1' ]},
       { resource_id: 'id2', resource_scopes: [ 'scope2' ]},
     ];
-    resourceStore.has.mockResolvedValueOnce(true);
-    resourceStore.has.mockResolvedValueOnce(false);
+    registrationStore.has.mockResolvedValueOnce(true);
+    registrationStore.has.mockResolvedValueOnce(false);
     await expect(handler.handle(request)).resolves
       .toEqual({ status: 400, body: { error: 'invalid_resource_id', error_description: 'Unknown UMA ID id2' }});
     expect(ticketStore.set).toHaveBeenCalledTimes(0);

@@ -1,16 +1,12 @@
+import { BadRequestHttpError, createErrorMessage, JwkGenerator, KeyValueStorage } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
-import {
-  BadRequestHttpError,
-  createErrorMessage,
-  getLoggerFor,
-  JwkGenerator,
-  KeyValueStorage
-} from '@solid/community-server';
 import { randomUUID } from 'node:crypto';
-import { SerializedToken , TokenFactory} from './TokenFactory';
-import { AccessToken } from './AccessToken';
+import { ensureJwkKid } from '../util/Jwk';
 import { array, reType } from '../util/ReType';
 import { Permission } from '../views/Permission';
+import { AccessToken } from './AccessToken';
+import { SerializedToken, TokenFactory } from './TokenFactory';
 
 const AUD = 'solid';
 
@@ -47,9 +43,13 @@ export class JwtTokenFactory extends TokenFactory {
    * @return {Promise<SerializedToken>} - access token response
    */
   public async serialize(token: AccessToken): Promise<SerializedToken> {
-    const key = await this.keyGen.getPrivateKey();
+    const key = await ensureJwkKid(await this.keyGen.getPrivateKey());
     const jwk = await importJWK(key, key.alg);
-    const jwt = await new SignJWT({ permissions: token.permissions, contract: token.contract })
+    const jwt = await new SignJWT({
+      permissions: token.permissions,
+      contract: token.contract,
+      issued_at: Date.now(),
+    })
       .setProtectedHeader({ alg: key.alg, kid: key.kid })
       .setIssuedAt()
       .setIssuer(this.issuer)
@@ -69,7 +69,7 @@ export class JwtTokenFactory extends TokenFactory {
    * @return {Promise<AccessToken>} - deserialized access token
    */
   public async deserialize(token: string): Promise<AccessToken> {
-    const key = await this.keyGen.getPublicKey();
+    const key = await ensureJwkKid(await this.keyGen.getPublicKey());
     const jwk = await importJWK(key, key.alg);
     try {
       const { payload } = await jwtVerify(token, jwk, {
@@ -81,7 +81,16 @@ export class JwtTokenFactory extends TokenFactory {
         throw new Error('missing required "permissions" claim.');
       }
 
-      return payload as AccessToken;
+      const permissions = payload.permissions;
+
+      reType(permissions, array(Permission));
+
+      const accessToken: AccessToken = { permissions };
+      if (payload.iat !== undefined) accessToken.iat = payload.iat;
+      if (payload.exp !== undefined) accessToken.exp = payload.exp;
+      if (payload.nbf !== undefined) accessToken.nbf = payload.nbf;
+      if (typeof payload.issued_at === 'number') accessToken.issued_at = payload.issued_at;
+      return accessToken;
     } catch (error: unknown) {
       const msg = `Invalid Access Token provided, error while parsing: ${createErrorMessage(error)}`;
       this.logger.warn(msg);

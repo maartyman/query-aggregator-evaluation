@@ -293,25 +293,40 @@ export class ResourceRegistrationRequestHandler extends HttpHandler {
     owner: string,
     description: ResourceDescription,
   ): Store {
-    const assignee = this.resourceRegistrationAuthorizedWebId?.trim();
-    if (!assignee) {
+    const assignees = this.getResourceRegistrationAuthorizedWebIds();
+    if (assignees.length === 0) {
       return new Store();
     }
-    return createRegisteredResourceAccessPolicy(id, owner, assignee, description.resource_scopes);
+    this.logger.info(
+      `Created registered-resource policy for query user(s) ${assignees.join(', ')} on ${id}.`
+    );
+    return new Store(assignees.flatMap((assignee) =>
+      createRegisteredResourceAccessPolicy(id, owner, assignee, description.resource_scopes)
+        .getQuads(null, null, null, null)
+    ));
   }
 
   protected findExistingConfiguredAccessPolicyQuads(policyStore: Store, id: string): Quad[] {
-    const assignee = this.resourceRegistrationAuthorizedWebId?.trim();
-    if (!assignee) {
+    const assignees = this.getResourceRegistrationAuthorizedWebIds();
+    if (assignees.length === 0) {
       return [];
     }
 
-    const policy = DF.namedNode(getRegisteredResourceAccessPolicyId(id, assignee));
-    const permissions = policyStore.getObjects(policy, ODRL.terms.permission, null);
-    return [
-      ...policyStore.getQuads(policy, null, null, null),
-      ...permissions.flatMap((permission) => policyStore.getQuads(permission, null, null, null)),
-    ];
+    return assignees.flatMap((assignee) => {
+      const policy = DF.namedNode(getRegisteredResourceAccessPolicyId(id, assignee));
+      const permissions = policyStore.getObjects(policy, ODRL.terms.permission, null);
+      return [
+        ...policyStore.getQuads(policy, null, null, null),
+        ...permissions.flatMap((permission) => policyStore.getQuads(permission, null, null, null)),
+      ];
+    });
+  }
+
+  protected getResourceRegistrationAuthorizedWebIds(): string[] {
+    return Array.from(new Set((this.resourceRegistrationAuthorizedWebId ?? '')
+      .split(',')
+      .map((assignee) => assignee.trim())
+      .filter((assignee) => assignee.length > 0)));
   }
 
   protected createDerivedResourceAccessPolicies(

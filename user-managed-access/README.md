@@ -15,7 +15,8 @@ This repository contains SolidLab research artefacts on use of UMA in the Solid 
 
 In order to run this project you need to perform the following steps.
 
-1. Ensure that you are using Node.js 20 or higher, e.g. by running `nvm use`. (see [.nvmrc](./.nvmrc))
+1. Install the [eye reasoner](https://github.com/eyereasoner/eye/) and have `eye` available on your path.
+2. Ensure that you are using Node.js 20 or higher, e.g. by running `nvm use`. (see [.nvmrc](./.nvmrc))
 2. Enable Node.js Corepack with `corepack enable`.
 3. Run `yarn install` in the project root (this will automatically call `yarn build`).
 4. Run `yarn start`.
@@ -30,6 +31,8 @@ You can then execute the following flows:
 - `yarn script:collection`: `POST`, `GET` and `DELETE` some text to/from `/alice/public/resource.txt` to test the correct creation and deletion of resource registrations on the UMA server.
                             An AssetCollection policy is used to create `/alice/public/`.
                             More information on the collection implementation can be found in [documentation/collections.md](documentation/collections.md).
+- `yarn script:uma-odrl-policy`: Tests all policy management APIs.
+- `yarn script:uma-odrl-end2end`: Tests the access request management APIs
 
 `yarn script:flow` runs all flows in sequence.
 
@@ -38,6 +41,11 @@ the above scripts are the best way to learn about how everything works.
 
 A more extensive getting started guide can be found
 in [documentation/getting-started.md](documentation/getting-started.md).
+
+More information on policy management can be found in
+[documentation/policy-management](documentation/policy-management.md).
+Policy management clients can discover manageable registered resources through
+[documentation/resource-owner-assets.md](documentation/resource-owner-assets.md).
 
 ## Demonstration
 

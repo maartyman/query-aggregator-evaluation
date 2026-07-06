@@ -91,7 +91,6 @@ Each authorization mode should be crossed with the execution modes below.
 | Mode | Result naming | Meaning |
 | --- | --- | --- |
 | No cache | `..._no-cache` | Client executes the query locally and fetches resources directly. |
-| File cache | `..._file-cache` | Client executes the query locally with a file-backed resource cache. Comunica still parses and indexes the cached RDF documents during query execution. |
 | Indexed cache | `..._indexed-cache` | Client first loads the relevant sources into an in-memory `n3.Store`, then runs the local Comunica query against that store. |
 | Aggregator | `..._aggregator` | Client uses a pre-created aggregator service directly. |
 | Aggregator discovery | `..._aggregator_discovered` | Client does not know the aggregator service upfront. It discovers candidate services from CSS Link/LDP discovery metadata, fetches service descriptions, matches the needed query, then invokes the selected aggregator service. |

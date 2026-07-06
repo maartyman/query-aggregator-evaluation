@@ -1,1 +1,1 @@
-export type CachingStrategy = "no-cache" | "file-cache" | "indexed-cache";
+export type CachingStrategy = "no-cache" | "indexed-cache";

@@ -30,6 +30,9 @@ vi.mock('node:crypto', () => ({
   randomUUID: vi.fn(),
 }));
 
+const CSS_READ = 'urn:example:css:modes:read';
+const CSS_WRITE = 'urn:example:css:modes:write';
+
 describe('ResourceRegistration', (): void => {
   const owner = 'owner';
   let input: HttpHandlerContext<ResourceDescription>;
@@ -49,7 +52,7 @@ describe('ResourceRegistration', (): void => {
       headers: {},
       body: {
         name: 'name',
-        resource_scopes: [ 'scope1', 'scope2' ],
+        resource_scopes: [ CSS_READ, CSS_WRITE ],
       }
     }};
 
@@ -131,7 +134,32 @@ describe('ResourceRegistration', (): void => {
       expect(policies.addRule).toHaveBeenCalledTimes(1);
       expect(policies.addRule.mock.calls[0][0]).toBeRdfIsomorphic([
         ...createOwnerAccessPolicy('name', owner).getQuads(null, null, null, null),
-        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ 'scope1', 'scope2' ])
+        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ CSS_READ, CSS_WRITE ])
+          .getQuads(null, null, null, null),
+      ]);
+    });
+
+    it('creates registered-resource policies for all configured authorized WebIDs.', async(): Promise<void> => {
+      handler = new ResourceRegistrationRequestHandler(
+        registrationStore,
+        policies,
+        validator,
+        undefined,
+        'query-user-1, query-user-2',
+      );
+
+      await expect(handler.handle(input)).resolves.toEqual({
+        status: 201,
+        headers: { location: `http://example.com/foo/name` },
+        body: { _id: 'name', user_access_policy_uri: 'TODO: implement policy UI' },
+      });
+
+      expect(policies.addRule).toHaveBeenCalledTimes(1);
+      expect(policies.addRule.mock.calls[0][0]).toBeRdfIsomorphic([
+        ...createOwnerAccessPolicy('name', owner).getQuads(null, null, null, null),
+        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user-1', [ CSS_READ, CSS_WRITE ])
+          .getQuads(null, null, null, null),
+        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user-2', [ CSS_READ, CSS_WRITE ])
           .getQuads(null, null, null, null),
       ]);
     });
@@ -265,7 +293,7 @@ describe('ResourceRegistration', (): void => {
         'query-user',
       );
       policyStore.addQuads(
-        createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ 'scope1', 'old-scope' ])
+        createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ CSS_READ, 'old-scope' ])
           .getQuads(null, null, null, null)
       );
 
@@ -276,7 +304,9 @@ describe('ResourceRegistration', (): void => {
 
       const policy = DF.namedNode(getRegisteredResourceAccessPolicyId('name', 'query-user'));
       const stalePermission = DF.namedNode(getRegisteredResourceAccessPermissionId('name', 'query-user', 'old-scope'));
-      const newPermission = DF.namedNode(getRegisteredResourceAccessPermissionId('name', 'query-user', 'scope2'));
+      const newPermission = DF.namedNode(
+        getRegisteredResourceAccessPermissionId('name', 'query-user', ODRL.terms.write.value)
+      );
 
       expect(policies.addRule).toHaveBeenCalledTimes(1);
       expect(policies.addRule.mock.calls[0][0].countQuads(policy, ODRL.terms.permission, newPermission, null)).toBe(1);
@@ -414,7 +444,7 @@ describe('ResourceRegistration', (): void => {
       expect(policies.removeData).toHaveBeenCalledTimes(1);
       expect(policies.removeData.mock.calls[0][0]).toBeRdfIsomorphic([
         ...createOwnerAccessPolicy('name', owner).getQuads(null, null, null, null),
-        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ 'scope1', 'scope2' ])
+        ...createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ CSS_READ, CSS_WRITE ])
           .getQuads(null, null, null, null),
       ]);
     });

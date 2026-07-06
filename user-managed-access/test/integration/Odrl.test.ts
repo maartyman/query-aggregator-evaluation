@@ -1,9 +1,12 @@
-import { App, setGlobalLoggerFactory, WinstonLoggerFactory } from '@solid/community-server';
+import { App } from '@solid/community-server';
+import { setGlobalLoggerFactory, WinstonLoggerFactory } from 'global-logger-factory';
+import { Parser, Writer } from 'n3';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import { getDefaultCssVariables, instantiateFromConfig } from '../util/ServerUtil';
+import { getDefaultCssVariables, getPorts, instantiateFromConfig } from '../util/ServerUtil';
+import { generateCredentials } from '../util/UmaUtil';
 
-const cssPort = 3002;
-const umaPort = 4002;
+const [ cssPort, umaPort ] = getPorts('ODRL');
 
 describe('An ODRL server setup', (): void => {
   let umaApp: App;
@@ -20,8 +23,6 @@ describe('An ODRL server setup', (): void => {
       {
         'urn:uma:variables:port': umaPort,
         'urn:uma:variables:baseUrl': `http://localhost:${umaPort}/uma`,
-        'urn:uma:variables:policyBaseIRI': `http://localhost:${cssPort}/`,
-        'urn:uma:variables:policyDir': path.join(__dirname, '../../packages/uma/config/rules/odrl'),
         'urn:uma:variables:eyePath': 'eye',
       }
     ) as App;
@@ -39,6 +40,36 @@ describe('An ODRL server setup', (): void => {
     await Promise.all([umaApp.start(), cssApp.start()]);
   });
 
+  describe('initializing the servers', (): void => {
+    it('can set up all the necessary policies.', async(): Promise<void> => {
+      const owner = 'https://pod.woutslabbinck.com/profile/card#me';
+      const url = `http://localhost:${umaPort}/uma/policies`;
+
+      // Need to parse the file so we can set the base URL to that of the resource server
+      const policyData = await readFile(
+        path.join(__dirname, '../../packages/uma/config/rules/odrl/policy0.ttl'), 'utf8');
+      const quads = new Parser({ baseIRI: `http://localhost:${cssPort}/` }).parse(policyData);
+      const body = new Writer().quadsToString(quads);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `WebID ${encodeURIComponent(owner)}`, 'content-type': 'text/turtle' },
+        body,
+      });
+      expect(response.status).toBe(201);
+    });
+
+    it('can register a PAT for the user.', async(): Promise<void> => {
+      await generateCredentials({
+        webId: `http://localhost:${cssPort}/alice/profile/card#me`,
+        authorizationServer: `http://localhost:${umaPort}/uma`,
+        resourceServer: `http://localhost:${cssPort}/`,
+        email: 'alice@example.org',
+        password: 'abc123'
+      });
+    });
+  });
+
   describe('creating a resource', (): void => {
     let wwwAuthenticateHeader: string;
     let ticket: string;
@@ -52,7 +83,7 @@ describe('An ODRL server setup', (): void => {
       });
 
       expect(noTokenResponse.status).toBe(401);
-      wwwAuthenticateHeader = noTokenResponse.headers.get("WWW-Authenticate");
+      wwwAuthenticateHeader = noTokenResponse.headers.get("WWW-Authenticate") as string;
       expect(typeof wwwAuthenticateHeader).toBe('string');
     });
 
@@ -70,7 +101,7 @@ describe('An ODRL server setup', (): void => {
       const configurationUrl = parsedHeader.as_uri + '/.well-known/uma2-configuration';
       const response = await fetch(configurationUrl);
       expect(response.status).toBe(200);
-      const configuration = await response.json();
+      const configuration = await response.json() as any;
       expect(typeof configuration.token_endpoint).toBe('string');
       tokenEndpoint = configuration.token_endpoint;
     });
@@ -93,7 +124,7 @@ describe('An ODRL server setup', (): void => {
 
       expect(asRequestResponse.status).toBe(200);
       expect(asRequestResponse.headers.get('content-type')).toBe('application/json');
-      jsonResponse = await asRequestResponse.json();
+      jsonResponse = await asRequestResponse.json() as any;
       expect(typeof jsonResponse.access_token).toBe('string');
       expect(jsonResponse.token_type).toBe('Bearer');
       const token = JSON.parse(Buffer.from(jsonResponse.access_token.split('.')[1], 'base64').toString());
@@ -127,7 +158,7 @@ describe('An ODRL server setup', (): void => {
       const noTokenResponse = await fetch(resource);
 
       expect(noTokenResponse.status).toBe(401);
-      wwwAuthenticateHeader = noTokenResponse.headers.get("WWW-Authenticate");
+      wwwAuthenticateHeader = noTokenResponse.headers.get("WWW-Authenticate") as string;
       expect(typeof wwwAuthenticateHeader).toBe('string');
     });
 
@@ -145,7 +176,7 @@ describe('An ODRL server setup', (): void => {
       const configurationUrl = parsedHeader.as_uri + '/.well-known/uma2-configuration';
       const response = await fetch(configurationUrl);
       expect(response.status).toBe(200);
-      const configuration = await response.json();
+      const configuration = await response.json() as any;
       expect(typeof configuration.token_endpoint).toBe('string');
       tokenEndpoint = configuration.token_endpoint;
     });
@@ -168,7 +199,7 @@ describe('An ODRL server setup', (): void => {
 
       expect(asRequestResponse.status).toBe(200);
       expect(asRequestResponse.headers.get('content-type')).toBe('application/json');
-      jsonResponse = await asRequestResponse.json();
+      jsonResponse = await asRequestResponse.json() as any;
       expect(typeof jsonResponse.access_token).toBe('string');
       expect(jsonResponse.token_type).toBe('Bearer');
       const token = JSON.parse(Buffer.from(jsonResponse.access_token.split('.')[1], 'base64').toString());

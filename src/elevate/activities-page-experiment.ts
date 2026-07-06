@@ -11,8 +11,7 @@ import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {AsyncIterator} from "asynciterator";
 import {IndexedStore} from "../utils/indexed-store";
-import {FileCacheFetch} from "../utils/file-cache-fetch";
-import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
+import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
 
 const availableServiceRel = "https://w3id.org/aggregator#availableService";
 
@@ -94,9 +93,7 @@ async function runQueriesInWorker(
   await auth?.init();
   await auth?.getAccessToken();
   const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
-  const queryFetch = cache === "file-cache"
-    ? new FileCacheFetch(resourceFetch).fetch
-    : resourceFetch;
+  const queryFetch = resourceFetch;
 
   const columnConfig = SelectedColumnsMap[selectedColumns];
   if (!columnConfig) {
@@ -115,13 +112,14 @@ async function runQueriesInWorker(
 
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
+    const mergedStore = store.getMerged(activitySources);
 
     await activityDao.count({
-      sources: store.getMany(activitySources) as any
+      sources: [mergedStore] as any
     });
 
     const resultIterator = await activityDao.find({
-      sources: store.getMany(activitySources) as any,
+      sources: [mergedStore] as any,
       keys: columnConfig.keys,
       filterKeys: columnConfig.filterKeys,
       ...(columnConfig.sort && { sort: columnConfig.sort })
@@ -133,12 +131,6 @@ async function runQueriesInWorker(
       resultIterator,
       { setupHttpMetrics, numberOfTriples: store.countQuads() }
     );
-  }
-
-  if (cache === "file-cache") {
-    await Promise.all(activitySources.map(source =>
-      queryFetch(source, { headers: { Accept: "text/turtle" } })
-    ));
   }
 
   const setupHttpMetrics = await getHttpMetricsSnapshot();
@@ -232,7 +224,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       auth: auth
     });
 
-    await this.registerScenarioServiceDescriptions(auth, activityDao, podContext, activitySources);
     await this.waitForDiscoveryLinks(auth, activitySources);
 
     // Mark as initialized for this pod/query combination
@@ -275,42 +266,9 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     );
   }
 
-  private async registerScenarioServiceDescriptions(
-    auth: Auth,
-    activityDao: ActivityDao,
-    podContext: PodContext,
-    activitySources: string[]
-  ): Promise<void> {
-    await activityDao.count({
-      sources: activitySources,
-      aggregator: {
-        enabled: true,
-        podContext,
-        enableCache: true,
-        descriptionOnly: true
-      },
-      auth
-    });
-
-    for (const columnConfig of Object.values(SelectedColumnsMap)) {
-      await activityDao.find({
-        sources: activitySources,
-        keys: columnConfig.keys,
-        filterKeys: columnConfig.filterKeys,
-        ...(columnConfig.sort && { sort: columnConfig.sort }),
-        aggregator: {
-          enabled: true,
-          podContext,
-          enableCache: true,
-          descriptionOnly: true
-        },
-        auth
-      });
-    }
-  }
-
   generate(): ExperimentSetup {
     this.removeGeneratedData();
+    const queryUsers: PodContext[] = [];
     let firstPodContext: PodContext | null = null;
     // Generate data in a dedicated pod per argument collection
     for (const iteration of this.experimentConfig.iterations) {
@@ -323,6 +281,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
         const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
         const experimentId = `${iteration.iterationName}-${optionValues}`;
         const podContext = this.generateProfileCard(experimentId);
+        queryUsers.push(podContext);
 
         const options: ActivityGeneratorOptions = ComplexityMap[complexity];
         if (!options) {
@@ -340,7 +299,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       }
     }
     const queryUserContext = this.getOrCreatePodContext(firstPodContext!.name);
-    return this.finalizeGeneration(queryUserContext);
+    return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
   private generateProfileCard(experimentId: string): PodContext {
@@ -385,7 +344,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
-          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
+          for (const cache of ["no-cache", "indexed-cache"] as const) {
             Logger.info(`Running local experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
@@ -451,14 +410,16 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
           }
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
-          await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
           for (const cache of ["no-cache"]) {
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, iteration ${iteration + 1}/${iterations}`);
+            await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
+
             const auth = new Auth(this.podContext, {enableCache: false});
             await auth.init();
             await auth.getAccessToken();
 
+            resetHttpMetrics();
             const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
 

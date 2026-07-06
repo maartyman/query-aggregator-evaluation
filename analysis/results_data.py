@@ -75,6 +75,13 @@ AGGREGATE_COLUMNS = [
     "averageDief10s",
 ]
 
+SUMMARY_DATAFRAME_COLUMNS = SUMMARY_COLUMNS + [
+    "experimentId",
+    "experimentType",
+    "warmupRuns",
+    "recordedRuns",
+]
+
 COMPLEXITY_ORDER = {
     "minimal": 0,
     "simple": 1,
@@ -92,7 +99,6 @@ AUTHORIZATION_LABELS = {
 
 VARIANT_ORDER = [
     ("local", "no-cache"),
-    ("local", "file-cache"),
     ("local-indexed-cache", "indexed-cache"),
     ("aggregator-discovered", ""),
     ("aggregator", ""),
@@ -100,7 +106,6 @@ VARIANT_ORDER = [
 
 VARIANT_LABELS = {
     ("local", "no-cache"): "Local / no-cache",
-    ("local", "file-cache"): "Local / file-cache",
     ("local-indexed-cache", "indexed-cache"): "Local / indexed-cache",
     ("aggregator-discovered", ""): "Aggregator discovered",
     ("aggregator", ""): "Aggregator",
@@ -108,11 +113,12 @@ VARIANT_LABELS = {
 
 VARIANT_COLORS = {
     "Local / no-cache": "#4b5563",
-    "Local / file-cache": "#d97706",
     "Local / indexed-cache": "#7c3aed",
     "Aggregator discovered": "#2563eb",
     "Aggregator": "#059669",
 }
+
+EXCLUDED_CACHE_STRATEGIES = {"file-cache"}
 
 WP_MESSAGES_EXPERIMENT = "wp-messages-experiment"
 WP_PARTICIPANTS_EXPERIMENT = "wp-participants-experiment"
@@ -214,6 +220,8 @@ def normalize_experiment_fields(row: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
+    if "cacheStrategy" in normalized:
+        normalized = normalized[~normalized["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES)].copy()
     if {"experimentName", "iterationName", "iterationArgs"}.issubset(normalized.columns):
         participant_mask = (
             (normalized["experimentName"] == WP_MESSAGES_EXPERIMENT)
@@ -251,7 +259,11 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
         parameters = data.get("parameters") or {}
+        if parameters.get("cacheStrategy") in EXCLUDED_CACHE_STRATEGIES:
+            continue
         file_name = path.name
+        if data.get("experimentId", "").endswith("_file-cache"):
+            continue
         rows.append(
             normalize_experiment_fields({
                 "file": file_name,
@@ -461,8 +473,8 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def load_dataframes(results_dir: Path = RESULTS_DIR) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     rows = load_results(results_dir)
-    summary_df = normalize_frame(pd.DataFrame(rows))
-    aggregates_df = normalize_frame(pd.DataFrame(aggregate(rows)))
+    summary_df = normalize_frame(pd.DataFrame(rows, columns=SUMMARY_DATAFRAME_COLUMNS))
+    aggregates_df = normalize_frame(pd.DataFrame(aggregate(rows), columns=AGGREGATE_COLUMNS))
     validation = validate(rows)
     return summary_df, aggregates_df, validation
 
@@ -473,8 +485,17 @@ def load_or_build_dataframes(results_dir: Path = RESULTS_DIR, output_dir: Path =
     validation_path = output_dir / "validation.json"
 
     if summary_path.exists() and aggregates_path.exists() and validation_path.exists():
-        summary_df = normalize_frame(pd.read_csv(summary_path))
-        aggregates_df = normalize_frame(pd.read_csv(aggregates_path))
+        raw_summary_df = pd.read_csv(summary_path)
+        raw_aggregates_df = pd.read_csv(aggregates_path)
+        if (
+            ("cacheStrategy" in raw_summary_df and raw_summary_df["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES).any())
+            or ("cacheStrategy" in raw_aggregates_df and raw_aggregates_df["cacheStrategy"].isin(EXCLUDED_CACHE_STRATEGIES).any())
+        ):
+            summary_df, aggregates_df, validation = write_outputs(results_dir, output_dir)
+            return summary_df, aggregates_df, validation
+
+        summary_df = normalize_frame(raw_summary_df)
+        aggregates_df = normalize_frame(raw_aggregates_df)
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
         if all(column in aggregates_df.columns for column in AGGREGATE_COLUMNS):
             return summary_df, aggregates_df, validation
@@ -500,7 +521,11 @@ def write_outputs(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR
     write_csv(output_dir / "summary.csv", rows, SUMMARY_COLUMNS)
     write_csv(output_dir / "aggregates.csv", aggregates, AGGREGATE_COLUMNS)
     (output_dir / "validation.json").write_text(json.dumps(validation, indent=2) + "\n", encoding="utf-8")
-    return normalize_frame(pd.DataFrame(rows)), normalize_frame(pd.DataFrame(aggregates)), validation
+    return (
+        normalize_frame(pd.DataFrame(rows, columns=SUMMARY_DATAFRAME_COLUMNS)),
+        normalize_frame(pd.DataFrame(aggregates, columns=AGGREGATE_COLUMNS)),
+        validation,
+    )
 
 
 def x_sort_key(iteration_args: str) -> tuple[int, object]:

@@ -1,12 +1,18 @@
-import {
-  Authorizer, createErrorMessage, ForbiddenHttpError, getLoggerFor, InternalServerError, UnauthorizedHttpError
-} from '@solid/community-server';
 import type { AccessMap, AuthorizerInput } from '@solid/community-server';
-import { OwnerUtil } from '../util/OwnerUtil';
-import { UmaClient } from '../uma/UmaClient';
+import {
+  Authorizer,
+  createErrorMessage,
+  ForbiddenHttpError,
+  HttpError,
+  InternalServerError,
+  UnauthorizedHttpError
+} from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
 import { DataFactory } from 'n3';
+import { UmaClient } from '../uma/UmaClient';
+import { OwnerUtil } from '../util/OwnerUtil';
 
-const { blankNode, namedNode, literal } = DataFactory;
+const { namedNode, literal } = DataFactory;
 
 export const WWW_AUTH = namedNode('urn:css:http:headers:www-authenticate');
 
@@ -43,7 +49,7 @@ export class UmaAuthorizer extends Authorizer {
       await this.authorizer.handleSafe(input);
     } catch (error: unknown) {
 
-      // Unless 403/403 throw original error
+      // Unless 401/403 throw original error
       if (!UnauthorizedHttpError.isInstance(error) && !ForbiddenHttpError.isInstance(error)) throw error;
 
       // Request UMA ticket
@@ -63,14 +69,17 @@ export class UmaAuthorizer extends Authorizer {
 
   protected async requestTicket(requestedModes: AccessMap): Promise<string | undefined> {
     const owner = await this.ownerUtil.findCommonOwner(requestedModes.keys());
-    const issuer = await this.ownerUtil.findIssuer(owner);
+    const { issuer, credentials } = await this.ownerUtil.findUmaSettings(owner);
 
-    if (!issuer) throw new InternalServerError(`No UMA authorization server found for ${owner}.`);
+    if (!issuer || !credentials) throw new InternalServerError(`Credentials and/or issuer are not set for ${owner}.`);
 
     try {
-      const ticket = await this.umaClient.fetchTicket(requestedModes, issuer);
+      const ticket = await this.umaClient.fetchTicket(requestedModes, issuer, credentials);
       return ticket ? `UMA realm="solid", as_uri="${issuer}", ticket="${ticket}"` : undefined;
     } catch (e) {
+      if (HttpError.isInstance(e)) {
+        throw e;
+      }
       this.logger.error(`Error while requesting UMA header: ${(e as Error).message}`);
       throw new InternalServerError(`Error while requesting UMA header: ${(e as Error).message}.`);
     }

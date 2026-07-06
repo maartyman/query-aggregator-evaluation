@@ -1,17 +1,21 @@
 import {
   AccessMap,
-  AccessMode,
   Authorizer,
-  ForbiddenHttpError, HttpError,
+  ForbiddenHttpError,
+  HttpError,
   IdentifierSetMultiMap,
-  InternalServerError
+  InternalServerError,
+  NotFoundHttpError
 } from '@solid/community-server';
+import { PERMISSIONS } from '@solidlab/policy-engine';
 import { Mocked } from 'vitest';
 import { UmaAuthorizer, WWW_AUTH } from '../../../src/authorization/UmaAuthorizer';
 import { UmaClient } from '../../../src/uma/UmaClient';
 import { OwnerUtil } from '../../../src/util/OwnerUtil';
 
 describe('UmaAuthorizer', (): void => {
+  const issuer = 'issuer';
+  const credentials = 'Basic 123';
   let source: Mocked<Authorizer>;
   let ownerUtil: Mocked<OwnerUtil>;
   let client: Mocked<UmaClient>;
@@ -24,7 +28,7 @@ describe('UmaAuthorizer', (): void => {
 
     ownerUtil = {
       findCommonOwner: vi.fn(),
-      findIssuer: vi.fn(),
+      findUmaSettings: vi.fn().mockResolvedValue({ issuer, credentials }),
     } satisfies Partial<OwnerUtil> as any;
 
     client = {
@@ -41,7 +45,7 @@ describe('UmaAuthorizer', (): void => {
     expect(source.handleSafe).toHaveBeenCalledTimes(1);
     expect(source.handleSafe).toHaveBeenLastCalledWith(input);
     expect(ownerUtil.findCommonOwner).toHaveBeenCalledTimes(0);
-    expect(ownerUtil.findIssuer).toHaveBeenCalledTimes(0);
+    expect(ownerUtil.findUmaSettings).toHaveBeenCalledTimes(0);
     expect(client.fetchTicket).toHaveBeenCalledTimes(0);
   });
 
@@ -51,28 +55,41 @@ describe('UmaAuthorizer', (): void => {
 
     await expect(authorizer.handle({ key: 'value' } as any)).rejects.toThrowError(error);
     expect(ownerUtil.findCommonOwner).toHaveBeenCalledTimes(0);
-    expect(ownerUtil.findIssuer).toHaveBeenCalledTimes(0);
+    expect(ownerUtil.findUmaSettings).toHaveBeenCalledTimes(0);
     expect(client.fetchTicket).toHaveBeenCalledTimes(0);
   });
 
   it('errors if no issuer could be found.', async(): Promise<void> => {
     source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
     ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
-    const requestedModes: AccessMap = new IdentifierSetMultiMap<AccessMode>([[ { path: 'id' }, AccessMode.read ]]);
+    ownerUtil.findUmaSettings.mockResolvedValueOnce({ credentials });
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'id' }, PERMISSIONS.Read ]]);
 
     await expect(authorizer.handle({ requestedModes } as any)).rejects
-      .toThrowError(`No UMA authorization server found for owner.`);
+      .toThrowError(`Credentials and/or issuer are not set for owner.`);
     expect(ownerUtil.findCommonOwner).toHaveBeenCalledTimes(1);
-    expect(ownerUtil.findIssuer).toHaveBeenCalledTimes(1);
+    expect(ownerUtil.findUmaSettings).toHaveBeenCalledTimes(1);
+    expect(client.fetchTicket).toHaveBeenCalledTimes(0);
+  });
+
+  it('errors if no PAT could be found.', async(): Promise<void> => {
+    source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
+    ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
+    ownerUtil.findUmaSettings.mockResolvedValueOnce({ issuer });
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'id' }, PERMISSIONS.Read ]]);
+
+    await expect(authorizer.handle({ requestedModes } as any)).rejects
+      .toThrowError(`Credentials and/or issuer are not set for owner.`);
+    expect(ownerUtil.findCommonOwner).toHaveBeenCalledTimes(1);
+    expect(ownerUtil.findUmaSettings).toHaveBeenCalledTimes(1);
     expect(client.fetchTicket).toHaveBeenCalledTimes(0);
   });
 
   it('adds the found ticket to the error.', async(): Promise<void> => {
     source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
     ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
-    ownerUtil.findIssuer.mockResolvedValueOnce('issuer');
     client.fetchTicket.mockResolvedValueOnce('ticket');
-    const requestedModes: AccessMap = new IdentifierSetMultiMap<AccessMode>([[ { path: 'id' }, AccessMode.read ]]);
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'id' }, PERMISSIONS.Read ]]);
 
     try {
       await authorizer.handle({ requestedModes } as any);
@@ -87,8 +104,7 @@ describe('UmaAuthorizer', (): void => {
   it('resolves if no ticket was received.', async(): Promise<void> => {
     source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
     ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
-    ownerUtil.findIssuer.mockResolvedValueOnce('issuer');
-    const requestedModes: AccessMap = new IdentifierSetMultiMap<AccessMode>([[ { path: 'id' }, AccessMode.read ]]);
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'id' }, PERMISSIONS.Read ]]);
 
     await expect(authorizer.handle({ requestedModes } as any)).resolves.toBeUndefined();
   });
@@ -96,11 +112,19 @@ describe('UmaAuthorizer', (): void => {
   it('throws an error if there was an issue fetching the ticket.', async(): Promise<void> => {
     source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
     ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
-    ownerUtil.findIssuer.mockResolvedValueOnce('issuer');
     client.fetchTicket.mockRejectedValueOnce(new Error('bad data'));
-    const requestedModes: AccessMap = new IdentifierSetMultiMap<AccessMode>([[ { path: 'id' }, AccessMode.read ]]);
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'id' }, PERMISSIONS.Read ]]);
 
     await expect(authorizer.handle({ requestedModes } as any)).rejects
       .toThrow(`Error while requesting UMA header: bad data.`);
+  });
+
+  it('preserves HTTP errors thrown while fetching a ticket.', async(): Promise<void> => {
+    source.handleSafe.mockRejectedValueOnce(new ForbiddenHttpError());
+    ownerUtil.findCommonOwner.mockResolvedValueOnce('owner');
+    client.fetchTicket.mockRejectedValueOnce(new NotFoundHttpError());
+    const requestedModes: AccessMap = new IdentifierSetMultiMap<string>([[ { path: 'missing' }, PERMISSIONS.Read ]]);
+
+    await expect(authorizer.handle({ requestedModes } as any)).rejects.toThrow(NotFoundHttpError);
   });
 });

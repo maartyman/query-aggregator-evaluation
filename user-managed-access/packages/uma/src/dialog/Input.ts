@@ -9,10 +9,6 @@ export const DialogInput = ({
   "@context": $(string),
   grant_type: $(string),
   ticket: $(string),
-  claim_tokens: $(array({
-    claim_token: $(string),
-    claim_token_format: $(string)}
-  )),
   claim_token: $(string),
   claim_token_format: $(string), // TODO: switch to array of claims objects with unknown structure
   pct: $(string),
@@ -20,6 +16,9 @@ export const DialogInput = ({
   permissions: $(array(Permission)), // this deviates from UMA, which only has a 'scope' string-array
   permission: $(array(ODRLPermission)), // this deviates from UMA, which only has a 'scope' string-array
   scope: $(string),
+  client_id: $(string),
+  derivation_resource_id: $(string),
+  refresh_token: $(string),
 });
 
 /**

@@ -1,4 +1,5 @@
 import { fetch } from 'cross-fetch';
+import { randomUUID } from 'node:crypto';
 
 const DEFAULT_UMA_ISSUER = 'http://localhost:4000/uma';
 
@@ -50,8 +51,53 @@ export class SolidOIDCAuth {
         const { id, secret } = await response.json();
         this.authString = `${encodeURIComponent(id)}:${encodeURIComponent(secret)}`;
 
+        if (controls.account?.pat) {
+            const umaCredentials = await this.createUmaClientCredentials();
+            response = await fetch(controls.account.pat, {
+                method: 'POST',
+                headers: {
+                    authorization: `CSS-Account-Token ${authorization}`,
+                    'content-type': 'application/json'
+                },
+                body: JSON.stringify({ id: umaCredentials.id, secret: umaCredentials.secret, issuer: DEFAULT_UMA_ISSUER }),
+            });
+            if (!response.ok) {
+                throw new Error('PAT update failed: ' + await response.text());
+            }
+        }
+
         // Get initial access token
         await this.refreshAccessToken();
+    }
+
+    private async createUmaClientCredentials(): Promise<{ id: string; secret: string }> {
+        const configResponse = await fetch(`${DEFAULT_UMA_ISSUER}/.well-known/uma2-configuration`);
+        if (!configResponse.ok) {
+            throw new Error('UMA configuration request failed: ' + await configResponse.text());
+        }
+        const config = await configResponse.json();
+        const registrationEndpoint = config.registration_endpoint;
+        if (!registrationEndpoint) {
+            throw new Error('UMA configuration missing registration_endpoint');
+        }
+
+        const response = await fetch(registrationEndpoint, {
+            method: 'POST',
+            headers: {
+                authorization: `WebID ${encodeURIComponent(this.webId)}`,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ client_uri: `${this.cssBaseURL}/client/${randomUUID()}` }),
+        });
+        if (!response.ok) {
+            throw new Error('UMA client registration failed: ' + await response.text());
+        }
+
+        const credentials = await response.json();
+        return {
+            id: credentials.client_id,
+            secret: credentials.client_secret,
+        };
     }
 
     private async refreshAccessToken() {

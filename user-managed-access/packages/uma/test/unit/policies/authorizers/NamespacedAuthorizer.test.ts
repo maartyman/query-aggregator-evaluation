@@ -1,16 +1,15 @@
-import { KeyValueStorage } from '@solid/community-server';
 import { Mocked } from 'vitest';
 import { ClaimSet } from '../../../../src/credentials/ClaimSet';
 import { Authorizer } from '../../../../src/policies/authorizers/Authorizer';
 import { NamespacedAuthorizer } from '../../../../src/policies/authorizers/NamespacedAuthorizer';
-import { ResourceDescription } from '../../../../src/views/ResourceDescription';
+import { Registration, RegistrationStore } from '../../../../src/util/RegistrationStore';
 
 describe('NamespacedAuthorizer', (): void => {
   const claims: ClaimSet = { claim: 'set' };
 
   let authorizers: Record<string, Mocked<Authorizer>>;
   let fallback: Mocked<Authorizer>;
-  let resourceStore: Mocked<KeyValueStorage<string, ResourceDescription>>;
+  let registrationStore: Mocked<RegistrationStore>;
   let authorizer: NamespacedAuthorizer;
 
   beforeEach(async(): Promise<void> => {
@@ -21,16 +20,17 @@ describe('NamespacedAuthorizer', (): void => {
 
     fallback = { permissions: vi.fn().mockResolvedValue('perm'), credentials: vi.fn().mockResolvedValue('cred'), };
 
-    const descriptions: Record<string, unknown> = {
-      res1: { name: 'http://example.com/foo/ns1/res' },
-      res2: { name: 'http://example.com/foo/ns2/res' },
-      res3: { name: 'http://example.com/foo/ns3/res' },
+    const descriptions: Record<string, Registration> = {
+      res1: { description: { name: 'http://example.com/foo/ns1/res', resource_scopes: [] }, owner: 'owner1' },
+      res2: { description: { name: 'http://example.com/foo/ns2/res', resource_scopes: [] }, owner: 'owner2' },
+      res3: { description: { name: 'http://example.com/foo/ns3/res', resource_scopes: [] }, owner: 'owner3' },
+      res4: { description: { name: 'Derived Resource', resource_scopes: [] }, owner: 'owner4' },
     }
-    resourceStore = {
+    registrationStore = {
       get: vi.fn((id: string): any => descriptions[id]),
-    } satisfies Partial<KeyValueStorage<string, ResourceDescription>> as any;
+    } satisfies Partial<RegistrationStore> as any;
 
-    authorizer = new NamespacedAuthorizer(authorizers, fallback, resourceStore);
+    authorizer = new NamespacedAuthorizer(authorizers, fallback, registrationStore);
   });
 
   describe('.permissions', (): void => {
@@ -56,13 +56,16 @@ describe('NamespacedAuthorizer', (): void => {
     it('calls the fallback authorizer if there is no match.', async(): Promise<void> => {
       const query1 = [{ resource_id: 'res3' }];
       const query2 = [{ resource_id: 'unknown' }];
+      const query3 = [{ resource_id: 'res4' }];
       await expect(authorizer.permissions(claims, query1)).resolves.toEqual('perm');
       await expect(authorizer.permissions(claims, query2)).resolves.toEqual('perm');
+      await expect(authorizer.permissions(claims, query3)).resolves.toEqual('perm');
       expect(authorizers.ns1.permissions).toHaveBeenCalledTimes(0);
       expect(authorizers.ns2.permissions).toHaveBeenCalledTimes(0);
-      expect(fallback.permissions).toHaveBeenCalledTimes(2);
+      expect(fallback.permissions).toHaveBeenCalledTimes(3);
       expect(fallback.permissions).toHaveBeenCalledWith(claims, query1);
       expect(fallback.permissions).toHaveBeenCalledWith(claims, query2);
+      expect(fallback.permissions).toHaveBeenCalledWith(claims, query3);
     });
   });
 
@@ -90,13 +93,16 @@ describe('NamespacedAuthorizer', (): void => {
     it('calls the fallback authorizer if there is no match.', async(): Promise<void> => {
       const perms1 = [{ resource_id: 'res3', resource_scopes: [ 'scope' ] }];
       const perms2 = [{ resource_id: 'unknown', resource_scopes: [ 'scope' ] }];
+      const perms3 = [{ resource_id: 'res4', resource_scopes: [ 'scope' ] }];
       await expect(authorizer.credentials(perms1, query)).resolves.toEqual('cred');
       await expect(authorizer.credentials(perms2, query)).resolves.toEqual('cred');
+      await expect(authorizer.credentials(perms3, query)).resolves.toEqual('cred');
       expect(authorizers.ns1.credentials).toHaveBeenCalledTimes(0);
       expect(authorizers.ns2.credentials).toHaveBeenCalledTimes(0);
-      expect(fallback.credentials).toHaveBeenCalledTimes(2);
+      expect(fallback.credentials).toHaveBeenCalledTimes(3);
       expect(fallback.credentials).toHaveBeenCalledWith(perms1, query);
       expect(fallback.credentials).toHaveBeenCalledWith(perms2, query);
+      expect(fallback.credentials).toHaveBeenCalledWith(perms3, query);
     });
   });
 });

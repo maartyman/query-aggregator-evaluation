@@ -1,11 +1,17 @@
-import { getLoggerFor, KeyValueStorage } from '@solid/community-server';
-import { ResourceDescription } from '../../views/ResourceDescription';
-import { Authorizer } from './Authorizer';
-import { Permission } from '../../views/Permission';
-import { Requirements } from '../../credentials/Requirements';
+import { getLoggerFor } from 'global-logger-factory';
 import { ClaimSet } from '../../credentials/ClaimSet';
+import { Requirements } from '../../credentials/Requirements';
+import { RegistrationStore } from '../../util/RegistrationStore';
+import { Permission } from '../../views/Permission';
+import { Authorizer } from './Authorizer';
 
-const namespace = (resource: string) => new URL(resource).pathname.split('/')?.[2] ?? '';
+const namespace = (resource: string): string | undefined => {
+  try {
+    return new URL(resource).pathname.split('/')?.[2] ?? '';
+  } catch {
+    return;
+  }
+};
 
 /**
  * An authorizer delegating to different authorizers based on the namespaces in the request.
@@ -19,12 +25,12 @@ export class NamespacedAuthorizer implements Authorizer {
    * @param authorizers - A key/value map with the key being the relevant namespace
    *                      and the value being the corresponding authorizer to use for that namespace.
    * @param fallback - Authorizer to use if there is no namespace match.
-   * @param resourceStore - The key/value store containing the resource registrations.
+   * @param registrationStore - The key/value store containing the resource registrations.
    */
   constructor(
     protected authorizers: Record<string, Authorizer>,
     protected fallback: Authorizer,
-    protected resourceStore: KeyValueStorage<string, ResourceDescription>,
+    protected registrationStore: RegistrationStore,
   ) {}
 
   /** @inheritdoc */
@@ -41,7 +47,7 @@ export class NamespacedAuthorizer implements Authorizer {
     for (let i = 1; i < query.length; ++i) {
       if ((query[i].resource_id ? await this.findNamespace(query[i].resource_id) : undefined) !== ns) {
         this.logger.warn(`Cannot calculate permissions over multiple namespaces at once.`);
-        return this.fallback.permissions(claims, query);
+        return [];
       }
     }
 
@@ -66,7 +72,7 @@ export class NamespacedAuthorizer implements Authorizer {
     for (let i = 1; i < permissions.length; ++i) {
       if (await this.findNamespace(permissions[i].resource_id) !== ns) {
         this.logger.warn(`Cannot calculate credentials over multiple namespaces at once.`);
-        return this.fallback.credentials(permissions, query);
+        return [];
       }
     }
 
@@ -84,13 +90,13 @@ export class NamespacedAuthorizer implements Authorizer {
       return;
     }
 
-    const description = await this.resourceStore.get(resourceId);
-    if (!description) {
+    const registration = await this.registrationStore.get(resourceId);
+    if (!registration) {
       this.logger.warn(`Cannot find a registered resource with id ${resourceId}`);
       return;
     }
 
-    const resourceIdentifier = description.name;
+    const resourceIdentifier = registration.description.name;
     if (!resourceIdentifier) {
       this.logger.warn(`Resource ${resourceId} has no registered name.`);
       return

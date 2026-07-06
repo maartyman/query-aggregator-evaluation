@@ -17,7 +17,6 @@ import type {Experiment} from "../experiment";
 import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
-import {FileCacheFetch} from "../utils/file-cache-fetch";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
@@ -91,9 +90,8 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
   await auth?.getAccessToken();
   const engine = new QueryEngine();
   const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
-  const queryFetch = cache === "file-cache"
-    ? new FileCacheFetch(resourceFetch).fetch
-    : resourceFetch;
+  const queryFetch = resourceFetch;
+  const queryContext = { fetch: queryFetch };
 
   if (cache === "indexed-cache") {
     const store = new IndexedStore();
@@ -102,12 +100,14 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
 
     const rawMessageBoxLocations = await (await engine.queryBindings(queryRoom, {
       sources: [ store.get(roomIri) ],
+      ...queryContext,
     })).map((bindings) => bindings.get('messageBoxUrl')!.value).toArray();
     const messageBoxLocations = [...new Set(rawMessageBoxLocations)];
     await store.add(messageBoxLocations, resourceFetch);
 
     const rawCreatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
       sources: store.getMany(messageBoxLocations),
+      ...queryContext,
     })).map((bindings) => bindings.get('creator')!.value).toArray();
     const creatorLocations = [...new Set(rawCreatorLocations)];
     await store.add(creatorLocations, resourceFetch);
@@ -116,14 +116,17 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
     const startTime = ExperimentResult.startMeasurement();
     await (await engine.queryBindings(queryRoom, {
       sources: [ store.get(roomIri) ],
+      ...queryContext,
     }))
       .toArray();
     await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
       sources: store.getMany(messageBoxLocations),
+      ...queryContext,
     }))
       .toArray();
     const resultIterator = await engine.queryBindings(queryPerson, {
       sources: store.getMany(creatorLocations),
+      ...queryContext,
     })
 
     return await ExperimentResult.fromIterator(
@@ -134,41 +137,13 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
     );
   }
 
-  if (cache === "file-cache") {
-    const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
-    const messageBoxLocations = await (await engine.queryBindings(queryRoom, {
-      sources: [roomIri],
-      fetch: queryFetch
-    }))
-      .map((bindings) => bindings.get('messageBoxUrl')!.value)
-      .toArray();
-
-    const creatorLocations = new Set<string>();
-    for (const messageBoxLocation of messageBoxLocations) {
-      const creators = await (await engine.queryBindings(
-        queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageBoxLocation}>`),
-        {
-          sources: [messageBoxLocation],
-          fetch: queryFetch
-        }
-      ))
-        .map((bindings) => bindings.get('creator')!.value)
-        .toArray();
-      creators.forEach(creator => creatorLocations.add(creator));
-    }
-
-    await Promise.all([ ...creatorLocations ].map(creator =>
-      queryFetch(creator, { headers: { Accept: "text/turtle" } })
-    ));
-  }
-
   const setupHttpMetrics = await getHttpMetricsSnapshot();
   const startTime = ExperimentResult.startMeasurement();
 
   const roomIri = `${podContext.baseUrl}/watchparties/myRooms/${room}/room#${room}`;
   const roomBindingsStream = await engine.queryBindings(queryRoom, {
     sources: [roomIri],
-    fetch: queryFetch
+    ...queryContext,
   });
 
   const creators = new Set();
@@ -180,7 +155,7 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
           queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageboxUrl}>`),
           {
             sources: [messageboxUrl],
-            fetch: queryFetch
+            ...queryContext,
           }));
         done();
       },
@@ -196,7 +171,7 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
             queryPerson,
             {
               sources: [creator],
-              fetch: queryFetch
+              ...queryContext,
             }
           ));
           done();
@@ -215,16 +190,17 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
 export class WatchPageExperiment extends WatchpartyDataGenerator implements Experiment {
   generate(): ExperimentSetup {
     this.removeGeneratedData();
+    const queryUsers: PodContext[] = [];
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
-        this.generateForWatchPage(iteration.iterationName+"-"+arg.join("_"), arg[0], arg[1]);
+        queryUsers.push(this.generateForWatchPage(iteration.iterationName+"-"+arg.join("_"), arg[0], arg[1]));
       }
     }
     const firstIteration = this.experimentConfig.iterations[0];
     const firstArg = firstIteration.args[0];
     const firstExperimentId = `${firstIteration.iterationName}-${firstArg.join("_")}`;
     const queryUserContext = this.getUserPodContext(this.queryUser, firstExperimentId);
-    return this.finalizeGeneration(queryUserContext);
+    return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
@@ -235,7 +211,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
-          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
+          for (const cache of ["no-cache", "indexed-cache"] as const) {
             Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             const result = await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
@@ -368,7 +344,11 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     await waitForAggregatorService(auth, personId, expectedMembers);
   }
 
-  public generateForWatchPage(experimentId: string, numberOfMembers: number, numberOfMessagesPerMember: number) {
+  public generateForWatchPage(
+    experimentId: string,
+    numberOfMembers: number,
+    numberOfMessagesPerMember: number
+  ): PodContext {
     const randomDate = new Date(Date.now() + Math.floor(Math.random() * 10000000000));
     const isoDate = randomDate.toISOString();
     const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
@@ -479,6 +459,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
       fs.mkdirSync(path.dirname(messageBoxFilePath), {recursive: true});
       fs.writeFileSync(messageBoxFilePath, messageBoxTriples);
     }
+    return queryUserContext;
   }
 }
 

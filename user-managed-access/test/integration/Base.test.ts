@@ -1,9 +1,13 @@
-import { App, setGlobalLoggerFactory, WinstonLoggerFactory } from '@solid/community-server';
+import { App, joinUrl } from '@solid/community-server';
+import { setGlobalLoggerFactory, WinstonLoggerFactory } from 'global-logger-factory';
+import { Parser, Writer } from 'n3';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import { getDefaultCssVariables, instantiateFromConfig } from '../util/ServerUtil';
+import { promises } from 'node:timers';
+import { getDefaultCssVariables, getPorts, instantiateFromConfig } from '../util/ServerUtil';
+import { generateCredentials, umaFetch } from '../util/UmaUtil';
 
-const cssPort = 3001;
-const umaPort = 4001;
+const [ cssPort, umaPort ] = getPorts('Base');
 
 describe('A server setup', (): void => {
   let umaApp: App;
@@ -18,8 +22,6 @@ describe('A server setup', (): void => {
       {
         'urn:uma:variables:port': umaPort,
         'urn:uma:variables:baseUrl': `http://localhost:${umaPort}/uma`,
-        'urn:uma:variables:policyBaseIRI': `http://localhost:${cssPort}/`,
-        'urn:uma:variables:policyDir': path.join(__dirname, '../../packages/uma/config/rules/policy'),
         'urn:uma:variables:eyePath': 'eye',
       }
     ) as App;
@@ -41,8 +43,77 @@ describe('A server setup', (): void => {
     await Promise.all([ umaApp.stop(), cssApp.stop() ]);
   });
 
+  describe('initializing the servers', (): void => {
+    it('RS: exposes Solid notification discovery without UMA authorization.', async(): Promise<void> => {
+      const storageDescription = `http://localhost:${cssPort}/alice/.well-known/solid`;
+      const storageResponse = await fetch(storageDescription, {
+        headers: { accept: 'text/turtle' },
+      });
+
+      expect(storageResponse.status).toBe(200);
+      expect(storageResponse.headers.has('WWW-Authenticate')).toBe(false);
+      await expect(storageResponse.text()).resolves.toContain('WebSocketChannel2023');
+
+      const channelDescription = `http://localhost:${cssPort}/.notifications/WebSocketChannel2023/`;
+      const channelResponse = await fetch(channelDescription);
+
+      expect(channelResponse.status).toBe(200);
+      expect(channelResponse.headers.has('WWW-Authenticate')).toBe(false);
+      await expect(channelResponse.json()).resolves.toMatchObject({
+        channelType: 'http://www.w3.org/ns/solid/notifications#WebSocketChannel2023',
+      });
+    });
+
+    it('can set up all the necessary policies.', async(): Promise<void> => {
+      const owner = 'https://pod.woutslabbinck.com/profile/card#me';
+      const url = `http://localhost:${umaPort}/uma/policies`;
+
+      // Need to parse the file so we can set the base URL to that of the resource server
+      const policyData = await readFile(
+        path.join(__dirname, '../../packages/uma/config/rules/policy/policy0.ttl'), 'utf8');
+      const quads = new Parser({ baseIRI: `http://localhost:${cssPort}/` }).parse(policyData);
+      const body = new Writer().quadsToString(quads);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `WebID ${encodeURIComponent(owner)}`, 'content-type': 'text/turtle' },
+        body,
+      });
+      expect(response.status).toBe(201);
+    });
+
+    it('can register client credentials for the user/RS combination.', async(): Promise<void> => {
+      await generateCredentials({
+        webId: `http://localhost:${cssPort}/alice/profile/card#me`,
+        authorizationServer: `http://localhost:${umaPort}/uma`,
+        resourceServer: `http://localhost:${cssPort}/`,
+        email: 'alice@example.org',
+        password: 'abc123'
+      });
+    });
+
+    it('can register client credentials for a different user/RS combination.', async(): Promise<void> => {
+      // There used to be an issue where this was not possible
+      const configResponse = await fetch(`http://localhost:${umaPort}/uma/.well-known/uma2-configuration`);
+      expect(configResponse.status).toBe(200);
+      const configuration = await configResponse.json() as { registration_endpoint: string };
+      expect(configuration.registration_endpoint).toBeDefined();
+
+      let response = await fetch(configuration.registration_endpoint, {
+        method: 'POST',
+        headers: {
+          authorization: `WebID ${encodeURIComponent(`http://localhost:${cssPort}/alice/profile/card#me`)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ client_uri: `http://example.org/` }),
+      });
+      expect(response.status).toBe(201);
+    });
+  });
+
   describe('using public namespace authorization', (): void => {
     it('RS: provides immediate read access.', async(): Promise<void> => {
+      await promises.setTimeout(1000);
       const publicResource = `http://localhost:${cssPort}/alice/profile/card`;
 
       const publicResponse = await fetch(publicResource);
@@ -58,6 +129,21 @@ describe('A server setup', (): void => {
     let ticket: string;
     let tokenEndpoint: string;
     let jsonResponse: { access_token: string, token_type: string };
+
+    function createNotificationChannelRequest(topic: string): RequestInit & { headers: Record<string, string> } {
+      return {
+        method: 'POST',
+        headers: { 'content-type': 'application/ld+json' },
+        body: JSON.stringify({
+          '@context': {
+            notify: 'http://www.w3.org/ns/solid/notifications#',
+          },
+          '@id': 'http://example.org/subscription',
+          '@type': 'notify:WebSocketChannel2023',
+          'notify:topic': { '@id': topic },
+        }),
+      };
+    }
 
     it('RS: sends a WWW-Authenticate response when access is private.', async(): Promise<void> => {
       const noTokenResponse = await fetch(collectionResource, {
@@ -84,7 +170,7 @@ describe('A server setup', (): void => {
       const configurationUrl = parsedHeader.as_uri + '/.well-known/uma2-configuration';
       const response = await fetch(configurationUrl);
       expect(response.status).toBe(200);
-      const configuration = await response.json();
+      const configuration = await response.json() as any;
       expect(typeof configuration.token_endpoint).toBe('string');
       tokenEndpoint = configuration.token_endpoint;
     });
@@ -107,7 +193,7 @@ describe('A server setup', (): void => {
 
       expect(asRequestResponse.status).toBe(200);
       expect(asRequestResponse.headers.get('content-type')).toBe('application/json');
-      jsonResponse = await asRequestResponse.json();
+      jsonResponse = await asRequestResponse.json() as any;
       expect(typeof jsonResponse.access_token).toBe('string');
       expect(jsonResponse.token_type).toBe('Bearer');
       const token = JSON.parse(Buffer.from(jsonResponse.access_token.split('.')[1], 'base64').toString());
@@ -129,6 +215,126 @@ describe('A server setup', (): void => {
       });
 
       expect(response.status).toBe(201);
+    });
+
+    it('RS: does not allow public read access to the new resource.', async(): Promise<void> => {
+      const response = await fetch(collectionResource);
+      expect(response.status).toBe(401);
+    });
+
+    it('RS: does not create a notification channel without read permission on the topic.', async(): Promise<void> => {
+      const request = createNotificationChannelRequest(collectionResource);
+      const response = await fetch(`http://localhost:${cssPort}/.notifications/WebSocketChannel2023/`, {
+        ...request,
+        headers: {
+          ...request.headers,
+          authorization: `${jsonResponse.token_type} ${jsonResponse.access_token}`,
+        },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get('WWW-Authenticate')).toMatch(/^UMA /u);
+    });
+
+    it('RS: creates a notification channel with read permission on the topic.', async(): Promise<void> => {
+      const response = await umaFetch(
+        `http://localhost:${cssPort}/.notifications/WebSocketChannel2023/`,
+        createNotificationChannelRequest(collectionResource),
+        `http://localhost:${cssPort}/alice/profile/card#me`,
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        type: 'http://www.w3.org/ns/solid/notifications#WebSocketChannel2023',
+        topic: collectionResource,
+      });
+    });
+
+    it('RS: allows the pod owner to read the new resource through UMA.', async(): Promise<void> => {
+      const response = await umaFetch(
+        collectionResource,
+        undefined,
+        `http://localhost:${cssPort}/alice/profile/card#me`,
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.text()).resolves.toEqual('Some text ...');
+    });
+
+    it('the resource can be made publicly accessible by having an anonymous assignee.', async(): Promise<void> => {
+      const owner = 'https://pod.woutslabbinck.com/profile/card#me';
+      const url = `http://localhost:${umaPort}/uma/policies`;
+
+      const policy = `
+        @prefix ex: <http://example.org/>.
+        @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+
+        ex:publicAnonPolicy a odrl:Agreement ;
+          odrl:uid ex:publicAnonPolicy ;
+          odrl:permission ex:publicAnonPermission .
+        ex:publicAnonPermission a odrl:Permission ;
+          odrl:action odrl:read , odrl:modify ;
+          odrl:target <${collectionResource}> ;
+          odrl:assignee <urn:solidlab:uma:id:anonymous> ;
+          odrl:assigner <${owner}> .
+      `;
+
+      const policyResponse = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `WebID ${encodeURIComponent(owner)}`, 'content-type': 'text/turtle' },
+        body: policy,
+      });
+      console.log(await policyResponse.text());
+      expect(policyResponse.status).toBe(201);
+
+      const putResponse = await fetch(collectionResource, {
+        method: 'PUT',
+        headers: { 'content-type': 'text/plain' },
+        body: 'Some new text!',
+      });
+      expect(putResponse.status).toBe(205);
+
+      const getResponse = await fetch(collectionResource);
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.text()).resolves.toEqual('Some new text!');
+    });
+
+    it('the resource can be made publicly accessible by being a Set without assignee.', async(): Promise<void> => {
+      const owner = 'https://pod.woutslabbinck.com/profile/card#me';
+      const url = `http://localhost:${umaPort}/uma/policies`;
+
+      const policy = `
+        @prefix ex: <http://example.org/>.
+        @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+
+        ex:publicPolicy a odrl:Set ;
+          odrl:uid ex:publicPolicy ;
+          odrl:permission ex:publicPermission .
+        ex:publicPermission a odrl:Permission ;
+          odrl:action odrl:read , odrl:modify ;
+          odrl:target <${collectionResource}> ;
+          odrl:assigner <${owner}> .
+      `;
+
+      const policyResponse = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `WebID ${encodeURIComponent(owner)}`, 'content-type': 'text/turtle' },
+        body: policy,
+      });
+      console.log(await policyResponse.text());
+      expect(policyResponse.status).toBe(201);
+
+      const putResponse = await fetch(collectionResource, {
+        method: 'PUT',
+        headers: { 'content-type': 'text/plain' },
+        body: 'Some new text!',
+      });
+      console.log(await putResponse.text());
+      expect(putResponse.status).toBe(205);
+
+      const getResponse = await fetch(collectionResource);
+      expect(getResponse.status).toBe(200);
+      await expect(getResponse.text()).resolves.toEqual('Some new text!');
     });
   });
 });

@@ -100,51 +100,83 @@ async function stopTrackedProcesses(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 1000));
 }
 
-async function allSeededAccountsHavePat(serverDataPath: string): Promise<boolean> {
+async function listSeededAccountsMissingPat(serverDataPath: string): Promise<string[]> {
   const accountsDataDir = path.join(serverDataPath, ".internal", "accounts", "data");
   let files: string[];
   try {
     files = await fs.readdir(accountsDataDir);
   } catch {
-    return false;
+    return [serverDataPath];
   }
 
   const accountFiles = files.filter(file => file.endsWith("$.json"));
   if (accountFiles.length === 0) {
-    return false;
+    return [serverDataPath];
   }
 
+  const missing: string[] = [];
   for (const file of accountFiles) {
     const content = await fs.readFile(path.join(accountsDataDir, file), "utf8");
     const account = JSON.parse(content).payload as { authzServer?: string; asToken?: unknown };
     if (account.authzServer && !account.asToken) {
-      return false;
+      missing.push(file);
     }
   }
-  return true;
+  return missing;
 }
 
 async function waitForCssAuthBootstrap(dataLocation: string, servers: ServerInstanceContext[]): Promise<void> {
-  const deadline = Date.now() + 120_000;
+  const accountCounts = await Promise.all(servers.map(async server => {
+    try {
+      const files = await fs.readdir(path.join(dataLocation, server.relativePath, ".internal", "accounts", "data"));
+      return files.filter(file => file.endsWith("$.json")).length;
+    } catch {
+      return 0;
+    }
+  }));
+  const accountCount = accountCounts.reduce((sum, count) => sum + count, 0);
+  const timeoutMs = Math.max(120_000, accountCount * 5_000);
+  const deadline = Date.now() + timeoutMs;
+  let missingByServer: Array<{ server: ServerInstanceContext; missing: string[] }> = [];
+
   while (Date.now() < deadline) {
-    const ready = await Promise.all(servers.map(server =>
-      allSeededAccountsHavePat(path.join(dataLocation, server.relativePath))
-    ));
-    if (ready.every(Boolean)) {
+    missingByServer = (await Promise.all(servers.map(async server => ({
+      server,
+      missing: await listSeededAccountsMissingPat(path.join(dataLocation, server.relativePath))
+    })))).filter(result => result.missing.length > 0);
+
+    if (missingByServer.length === 0) {
       return;
     }
 
-    console.log("Waiting for CSS auth bootstrap to complete...");
+    const missingCount = missingByServer.reduce((sum, result) => sum + result.missing.length, 0);
+    console.log(`Waiting for CSS auth bootstrap to complete (${missingCount}/${accountCount} account(s) missing PAT)...`);
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
-  throw new Error("Timed out while waiting for CSS auth bootstrap to complete");
+  const sample = missingByServer
+    .flatMap(result => result.missing.slice(0, 3).map(file => `${result.server.relativePath}/${file}`))
+    .slice(0, 10)
+    .join(", ");
+  throw new Error(
+    `Timed out while waiting ${timeoutMs}ms for CSS auth bootstrap to complete` +
+    (sample ? `. Missing PAT sample: ${sample}` : "")
+  );
 }
 
 async function pathExists(location: string): Promise<boolean> {
   try {
     await fs.access(location);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function precompiledUmaAppIsCurrent(location: string): Promise<boolean> {
+  try {
+    const content = await fs.readFile(location, "utf8");
+    return !content.includes(`backup${"FilePath"}`);
   } catch {
     return false;
   }
@@ -193,10 +225,12 @@ export async function startServers(
       : "";
     const umaPrecompiledEntry = path.join(umaLocation, "bin", "main-precompiled.js");
     const umaPrecompiledApp = path.join(umaLocation, "dist", "precompiled", `app-${authorizationMode}.js`);
-    const umaEntry = await pathExists(umaPrecompiledEntry) && await pathExists(umaPrecompiledApp)
+    const umaEntry = await pathExists(umaPrecompiledEntry) &&
+      await pathExists(umaPrecompiledApp) &&
+      await precompiledUmaAppIsCurrent(umaPrecompiledApp)
       ? `${umaLocation}/bin/main-precompiled.js --mode ${authorizationMode}`
       : `${umaLocation}/bin/main.js`;
-    const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --backupFilePath "${server.umaPolicyBackupPath}" --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
+    const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
     runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
   }
 
@@ -269,13 +303,28 @@ export async function startServers(
     aggregatorExit = { code, signal };
   });
 
-  console.log("waiting 3 seconds for servers to start...");
-  await new Promise(resolve => setTimeout(resolve, 3000));
-  if (aggregatorExit) {
-    throw new Error(
-      `Aggregator exited during startup with code ${aggregatorExit.code}` +
-      `${aggregatorExit.signal ? ` (signal ${aggregatorExit.signal})` : ''}. ` +
-      `Command was: ${aggregatorCommand}`
-    );
+  console.log("Waiting for aggregator to be up...");
+  const aggregatorReadyDeadline = Date.now() + 120_000;
+  while (Date.now() < aggregatorReadyDeadline) {
+    if (aggregatorExit) {
+      throw new Error(
+        `Aggregator exited during startup with code ${aggregatorExit.code}` +
+        `${aggregatorExit.signal ? ` (signal ${aggregatorExit.signal})` : ''}. ` +
+        `Command was: ${aggregatorCommand}`
+      );
+    }
+
+    try {
+      const response = await fetch("http://localhost:5000/config", { method: "HEAD" });
+      if (response.status < 500) {
+        return;
+      }
+    } catch {
+      // Keep polling until the listener is bound.
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
+
+  throw new Error(`Timed out while waiting for aggregator to be up. Command was: ${aggregatorCommand}`);
 }

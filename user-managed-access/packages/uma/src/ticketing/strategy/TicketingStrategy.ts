@@ -8,6 +8,11 @@ import type { Requirements } from "../../credentials/Requirements";
  * A strategy interface for different actions on Tickets.
  */
 export interface TicketingStrategy {
+  /**
+   * Whether tickets for derived resources should require upstream derivation
+   * access-token claims.
+   */
+  requiresDerivationClaims?: boolean;
 
   /**
    * Initializes a Ticket based on requested Permissions.

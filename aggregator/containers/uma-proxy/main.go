@@ -50,13 +50,13 @@ func main() {
 		solidAuth = NewSolidAuth(webId)
 		if err := solidAuth.Init(email, password); err != nil {
 			logrus.WithFields(logrus.Fields{"err": err}).Error("⚠️ Failed to initialize Solid OIDC auth")
-			logrus.Warn("⚠️ Continuing without Solid OIDC authentication")
-			solidAuth = nil
+			os.Exit(1)
 		} else {
 			logrus.Info("✅ Solid OIDC authentication initialized successfully")
 		}
 	} else {
-		logrus.Info("No static Solid OIDC credentials configured; proxy will forward requests without adding authentication")
+		logrus.Error("Missing WEBID, EMAIL, or PASSWORD; refusing to start unauthenticated UMA proxy")
+		os.Exit(1)
 	}
 
 	http.HandleFunc("/", Handler)

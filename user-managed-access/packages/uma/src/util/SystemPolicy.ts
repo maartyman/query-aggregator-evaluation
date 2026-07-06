@@ -43,13 +43,25 @@ export const getRegisteredResourceAccessPermissionId = (
     encodeResourceId(`${resourceId}|${assignee}|${action}`)
   }`;
 
+const CSS_SCOPE_TO_ODRL_ACTION: Record<string, string> = {
+  'urn:example:css:modes:read': ODRL.read,
+  'urn:example:css:modes:append': ODRL.append,
+  'urn:example:css:modes:create': ODRL.create,
+  'urn:example:css:modes:delete': ODRL.delete,
+  'urn:example:css:modes:write': ODRL.write,
+};
+
+const toOdrlAction = (action: string): string => CSS_SCOPE_TO_ODRL_ACTION[action] ?? action;
+
 export const createRegisteredResourceAccessPolicy = (
   resourceId: string,
   assigner: string,
   assignee: string,
   actions: string[] = [],
 ): Store => {
-  const uniqueActions = Array.from(new Set(actions.filter((action) => action.trim().length > 0)));
+  const uniqueActions = Array.from(new Set(actions
+    .map(toOdrlAction)
+    .filter((action) => action.trim().length > 0)));
   if (uniqueActions.length === 0) {
     return new Store();
   }

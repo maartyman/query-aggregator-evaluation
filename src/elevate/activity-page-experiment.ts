@@ -10,16 +10,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
-import {FileCacheFetch} from "../utils/file-cache-fetch";
-import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
+import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
 
-/**
- * The activity always contains every triple the query requires, so an empty
- * result set never reflects the generated data. It only happens when the live
- * HTTP query against a freshly started CSS server hits a transient empty/failed
- * response, which Comunica surfaces as a stream that ends without any bindings.
- * Retry a few times before treating it as a genuine failure.
- */
 async function withResultRetry<T>(
   fn: () => Promise<T>,
   { retries = 5, delayMs = 300 }: { retries?: number; delayMs?: number } = {}
@@ -48,9 +40,7 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
   await auth?.init();
   await auth?.getAccessToken();
   const resourceFetch = auth ? auth.fetch.bind(auth) : createMeasuredFetch();
-  const queryFetch = cache === "file-cache"
-    ? new FileCacheFetch(resourceFetch).fetch
-    : resourceFetch;
+  const queryFetch = resourceFetch;
 
   const activityUrl = `${podContext.baseUrl}/activities/${activityLocation}`;
   const activityIri = `${activityUrl}#activity`;
@@ -81,10 +71,6 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
   }
 
   return await withResultRetry(async () => {
-    if (cache === "file-cache") {
-      await queryFetch(activityUrl, { headers: { Accept: "text/turtle" } });
-    }
-
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
 
@@ -150,15 +136,58 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
     this.aggregatorIdStore.set(cacheKey, 'initialized');
   }
 
+  private async waitForDelegatedAggregatorAuthorization(podContext: PodContext, activityLocation: string): Promise<void> {
+    if (this.experimentConfig.authorizationMode !== "delegated") {
+      return;
+    }
+
+    const activityUrl = `${podContext.baseUrl}/activities/${activityLocation}`;
+    const activityIri = `${activityUrl}#activity`;
+    const deadline = Date.now() + 30_000;
+    let lastError: unknown;
+
+    while (Date.now() < deadline) {
+      const auth = new Auth(podContext, {enableCache: false});
+      await auth.init();
+      await auth.getAccessToken();
+
+      try {
+        const activityDao = new ActivityDao();
+        await activityDao.getById(activityIri, {
+          aggregator: {
+            enabled: true,
+            podContext,
+            enableCache: false,
+            expectedBindings: 1
+          },
+          auth
+        });
+
+        if (auth.getDerivationClaimRequestCount() > 0) {
+          return;
+        }
+        lastError = new Error("Aggregator service authorized without requesting upstream derivation claims.");
+      } catch (error) {
+        lastError = error;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    throw new Error(`Delegated aggregator service did not require upstream derivation claims within 30000ms: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+
   generate(): ExperimentSetup {
     this.removeGeneratedData();
+    const queryUsers: PodContext[] = [];
     let firstPodContext: PodContext | null = null;
     // Generate data in a dedicated pod per argument collection
     for (const iteration of this.experimentConfig.iterations) {
       for (const arg of iteration.args) {
         const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
         const experimentId = `${iteration.iterationName}-${optionValues}`;
-        let podContext = this.generateProfileCard(experimentId);
+        const podContext = this.generateProfileCard(experimentId);
+        queryUsers.push(podContext);
         const options: ActivityGeneratorOptions = ComplexityMap[arg[0]];
         if (!options) {
           throw new Error(`No scenario found for argument: ${arg[0]}`);
@@ -170,7 +199,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
       }
     }
     const queryUserContext = this.getOrCreatePodContext(firstPodContext!.name);
-    return this.finalizeGeneration(queryUserContext);
+    return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
   private generateProfileCard(experimentId: string): PodContext {
@@ -206,7 +235,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
           const activityLocation = "activity";
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
-          for (const cache of ["no-cache", "file-cache", "indexed-cache"]) {
+          for (const cache of ["no-cache", "indexed-cache"] as const) {
             Logger.info(`Running local experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
             await new Promise<ExperimentResult>((resolve, reject) => {
               const logLevel = Logger.getLevel()
@@ -267,12 +296,15 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
           for (const cache of ["no-cache"]) {
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, iteration ${iteration + 1}/${iterations}`);
+
             await this.setupAggregator(this.podContext, activityLocation);
+            await this.waitForDelegatedAggregatorAuthorization(this.podContext, activityLocation);
 
             const auth = new Auth(this.podContext, {enableCache: false});
             await auth.init();
             await auth.getAccessToken();
 
+            resetHttpMetrics();
             const setupHttpMetrics = await getHttpMetricsSnapshot();
             const startTime = ExperimentResult.startMeasurement();
 
@@ -314,7 +346,10 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               this.podContext.name + "_" + activityLocation + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
               aggregatorResultJson,
-              { setupHttpMetrics }
+              {
+                setupHttpMetrics,
+                derivationClaimRequests: auth.getDerivationClaimRequestCount()
+              }
             );
             results.push(aggregatorResult);
 

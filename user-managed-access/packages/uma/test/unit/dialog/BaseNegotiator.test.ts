@@ -8,11 +8,7 @@ import { NeedInfoError, RequiredClaimsInfo } from '../../../src/errors/NeedInfoE
 import { TicketingStrategy } from '../../../src/ticketing/strategy/TicketingStrategy';
 import { Ticket } from '../../../src/ticketing/Ticket';
 import { SerializedToken, TokenFactory } from '../../../src/tokens/TokenFactory';
-import { ResourceDescription } from '../../../src/views/ResourceDescription';
-
-vi.mock('node:crypto', () => ({
-  randomUUID: vi.fn().mockReturnValue('ticket-id'),
-}));
+import { RegistrationStore } from '../../../src/util/RegistrationStore';
 
 describe('BaseNegotiator', (): void => {
   const input: DialogInput = {
@@ -32,9 +28,9 @@ describe('BaseNegotiator', (): void => {
 
   let verifier: Mocked<Verifier>
   let ticketStore: Mocked<KeyValueStorage<string, Ticket>>;
-  let resourceStore: Mocked<KeyValueStorage<string, ResourceDescription>>;
   let ticketingStrategy: Mocked<TicketingStrategy>;
   let tokenFactory: Mocked<TokenFactory>;
+  let registrationStore: Mocked<RegistrationStore>;
   let negotiator: BaseNegotiator;
 
   beforeEach(async(): Promise<void> => {
@@ -51,14 +47,6 @@ describe('BaseNegotiator', (): void => {
       entries: vi.fn().mockImplementation(() => ticketData.entries()),
     };
 
-    resourceStore = {
-      has: vi.fn(),
-      get: vi.fn(),
-      set: vi.fn(),
-      delete: vi.fn(),
-      entries: vi.fn(),
-    };
-
     ticketingStrategy = {
       initializeTicket: vi.fn().mockResolvedValue(ticket),
       validateClaims: vi.fn().mockResolvedValue(ticket),
@@ -73,7 +61,11 @@ describe('BaseNegotiator', (): void => {
       deserialize: vi.fn(),
     };
 
-    negotiator = new BaseNegotiator(verifier, ticketStore, ticketingStrategy, tokenFactory, resourceStore);
+    registrationStore = {
+      get: vi.fn(),
+    } as any;
+
+    negotiator = new BaseNegotiator(verifier, ticketStore, ticketingStrategy, tokenFactory);
   });
 
   it('errors if the input is in the wrong type.', async(): Promise<void> => {
@@ -92,39 +84,6 @@ describe('BaseNegotiator', (): void => {
     expect(tokenFactory.serialize).toHaveBeenCalledTimes(1);
     expect(tokenFactory.serialize).toHaveBeenLastCalledWith(
       { permissions: { resource_id: 'id1', resource_scopes: [ 'scope1' ] } });
-  });
-
-  it('returns derivation identifiers and management tokens for derivation creation.', async(): Promise<void> => {
-    const crypto = await import('node:crypto');
-    vi.mocked(crypto.randomUUID).mockReturnValueOnce('derivation-id' as any);
-    tokenFactory.serialize
-      .mockResolvedValueOnce({ token: 'access-token', tokenType: 'Bearer' })
-      .mockResolvedValueOnce({ token: 'management-token', tokenType: 'Bearer' });
-
-    await expect(negotiator.negotiate({
-      ...input,
-      scope: 'urn:knows:uma:scopes:derivation-creation',
-    })).resolves.toEqual({
-      access_token: 'access-token',
-      token_type: 'Bearer',
-      derivation_resource_id: 'derivation-id',
-      management_access_token: {
-        access_token: 'management-token',
-        token_type: 'Bearer',
-      },
-    });
-    expect(resourceStore.set).toHaveBeenCalledWith('derivation-id', {
-      resource_scopes: [ 'urn:knows:uma:scopes:derivation-read' ],
-    });
-    expect(tokenFactory.serialize).toHaveBeenLastCalledWith({
-      permissions: [{
-        resource_id: 'derivation-id',
-        resource_scopes: [
-          'urn:knows:uma:scopes:write',
-          'urn:knows:uma:scopes:delete',
-        ],
-      }],
-    });
   });
 
   it('errors if there is no existing ticket and no permission request.', async(): Promise<void> => {
@@ -150,43 +109,46 @@ describe('BaseNegotiator', (): void => {
     } catch (error) {
       expect(error).toBeInstanceOf(NeedInfoError);
       expect((error as NeedInfoError).additionalParams).toEqual({
-        required_claims: [{ claim_token_format: 'fn' }],
+        required_claims: { claim_token_format: [['fn']] },
       });
     }
     expect(ticketStore.set).toHaveBeenCalledTimes(1);
   });
 
-  it('requests derivation-access claims using the spec shape.', async(): Promise<void> => {
+  it('requires upstream access token claims for registered derived resources.', async(): Promise<void> => {
     ticketingStrategy.initializeTicket.mockResolvedValueOnce({
-      permissions: [{ resource_id: 'derived', resource_scopes: [ 'urn:knows:uma:scopes:read' ] }],
+      permissions: [{ resource_id: 'derived', resource_scopes: ['read'] }],
       provided: {},
-      required: [],
+      required: [{}],
     });
-    ticketingStrategy.resolveTicket.mockResolvedValueOnce({ success: false, value: [] });
-    resourceStore.get.mockResolvedValueOnce({
-      resource_scopes: [ 'urn:knows:uma:scopes:read' ],
-      resource_relations: {
-        'prov:wasDerivedFrom': [
-          { issuer: 'https://upstream.example/uma', derivation_resource_id: 'upstream-derived' },
-        ],
+    registrationStore.get.mockResolvedValueOnce({
+      owner: 'owner',
+      description: {
+        resource_scopes: ['read'],
+        derived_from: [{
+          issuer: 'https://upstream.example/',
+          derivation_resource_id: 'handle-id-1',
+        }],
       },
     });
+    negotiator = new BaseNegotiator(verifier, ticketStore, ticketingStrategy, tokenFactory, registrationStore);
 
     try {
-      await negotiator.negotiate({ permissions: [{ resource_id: 'derived', resource_scopes: [ 'urn:knows:uma:scopes:read' ] }] });
+      await negotiator.negotiate({ permissions: [{ resource_id: 'derived', resource_scopes: ['read'] }] });
     } catch (error) {
       expect(error).toBeInstanceOf(NeedInfoError);
       expect((error as NeedInfoError).additionalParams).toEqual({
         required_claims: [{
-          claim_type: 'https://spec.knows.idlab.ugent.be/aggregator-protocol/latest/#derivation-access',
-          friendly_name: 'Prove access to source',
+          claim_type: 'https://w3id.org/aggregator#derivation-access',
           claim_token_format: 'urn:ietf:params:oauth:token-type:access_token',
-          issuer: 'https://upstream.example/uma',
-          derivation_resource_id: 'upstream-derived',
-          resource_scopes: [ 'urn:knows:uma:scopes:derivation-read' ],
+          issuer: 'https://upstream.example/',
+          derivation_resource_id: 'handle-id-1',
+          resource_scopes: ['read'],
         }],
       });
     }
+    expect(ticketingStrategy.resolveTicket).toHaveBeenCalledTimes(0);
+    expect(ticketStore.set).toHaveBeenCalledTimes(1);
   });
 
   it('errors if an invalid ticket is provided.', async(): Promise<void> => {
@@ -213,6 +175,43 @@ describe('BaseNegotiator', (): void => {
       { permissions: { resource_id: 'id1', resource_scopes: [ 'scope1' ] } });
   });
 
+  it('requires upstream access token claims for stored tickets targeting derived resources.', async(): Promise<void> => {
+    ticketData.set('ticket', {
+      permissions: [{ resource_id: 'derived', resource_scopes: ['read'] }],
+      provided: {},
+      required: [],
+    });
+    registrationStore.get.mockResolvedValueOnce({
+      owner: 'owner',
+      description: {
+        resource_scopes: ['read'],
+        derived_from: [{
+          issuer: 'https://upstream.example/',
+          derivation_resource_id: 'handle-id-1',
+        }],
+      },
+    });
+    negotiator = new BaseNegotiator(verifier, ticketStore, ticketingStrategy, tokenFactory, registrationStore);
+
+    try {
+      await negotiator.negotiate({ ticket: 'ticket' });
+    } catch (error) {
+      expect(error).toBeInstanceOf(NeedInfoError);
+      expect((error as NeedInfoError).additionalParams).toEqual({
+        required_claims: [{
+          claim_type: 'https://w3id.org/aggregator#derivation-access',
+          claim_token_format: 'urn:ietf:params:oauth:token-type:access_token',
+          issuer: 'https://upstream.example/',
+          derivation_resource_id: 'handle-id-1',
+          resource_scopes: ['read'],
+        }],
+      });
+    }
+    expect(ticketStore.delete).toHaveBeenCalledTimes(1);
+    expect(ticketingStrategy.resolveTicket).toHaveBeenCalledTimes(0);
+    expect(ticketStore.set).toHaveBeenCalledTimes(1);
+  });
+
   it('errors if invalid credentials are provided.', async(): Promise<void> => {
     await expect(negotiator.negotiate({ ...input, claim_token: 'token' }))
       .rejects.toThrow('Request with a "claim_token" must contain a "claim_token_format".');
@@ -221,10 +220,6 @@ describe('BaseNegotiator', (): void => {
   });
 
   it('processes the credentials if they are provided.', async(): Promise<void> => {
-    verifier.verify.mockImplementationOnce(async(_credential, claimSet): Promise<ClaimSet> => {
-      Object.assign(claimSet!, claims);
-      return claimSet!;
-    });
     await expect(negotiator.negotiate({ ...input, claim_token: 'token', claim_token_format: 'format' })).resolves
       .toEqual({ access_token: 'token', token_type: 'type' });
     expect(ticketStore.get).toHaveBeenCalledTimes(0);
@@ -233,7 +228,7 @@ describe('BaseNegotiator', (): void => {
     expect(ticketingStrategy.initializeTicket).toHaveBeenCalledTimes(1);
     expect(ticketingStrategy.initializeTicket).toHaveBeenLastCalledWith(input.permissions);
     expect(verifier.verify).toHaveBeenCalledTimes(1);
-    expect(verifier.verify).toHaveBeenLastCalledWith({ token: 'token', format: 'format' }, claims);
+    expect(verifier.verify).toHaveBeenLastCalledWith({ token: 'token', format: 'format' });
     expect(ticketingStrategy.validateClaims).toHaveBeenCalledTimes(1);
     expect(ticketingStrategy.validateClaims).toHaveBeenLastCalledWith(ticket, claims);
     expect(tokenFactory.serialize).toHaveBeenCalledTimes(1);

@@ -33,11 +33,6 @@
         "@type": "Variable"
       },
       {
-        "comment": "File path pointing to where policies should be backed up. Set to empty string to disable backups.",
-        "@id": "urn:uma:variables:backupFilePath",
-        "@type": "Variable"
-      },
-      {
         "comment": "WebID that receives all registered scopes for every registered resource.",
         "@id": "urn:uma:variables:resourceRegistrationAuthorizedWebId",
         "@type": "Variable"

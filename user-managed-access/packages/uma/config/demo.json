@@ -1,7 +1,7 @@
 {
   "@context": [
     "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma/^0.0.0/components/context.jsonld",
-    "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/ucp/^0.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/asynchronous-handlers/^1.0.0/components/context.jsonld"
   ],
   "import": [
     "sai-uma:config/default.json"
@@ -34,7 +34,7 @@
             }
           }
         ],
-        "resourceStore": { "@id": "urn:uma:default:ResourceRegistrationStore" }
+        "registrationStore": { "@id": "urn:uma:default:ResourceRegistrationStore" }
       }
     },
     {

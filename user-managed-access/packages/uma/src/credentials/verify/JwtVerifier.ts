@@ -1,10 +1,10 @@
-import { getLoggerFor } from '@solid/community-server';
-import { Verifier } from './Verifier';
-import { ClaimSet } from '../ClaimSet';
-import { Credential } from "../Credential";
-import { JWT } from '../Formats';
+import buildGetJwks, { GetJwks } from 'get-jwks';
+import { getLoggerFor } from 'global-logger-factory';
 import { decodeJwt, decodeProtectedHeader, jwtVerify } from 'jose';
-import buildGetJwks, {GetJwks} from 'get-jwks';
+import { ClaimSet } from '../ClaimSet';
+import { Credential } from '../Credential';
+import { JWT } from '../Formats';
+import { Verifier } from './Verifier';
 
 /**
  * An UNSECURE Verifier that parses Tokens of the format `encode_uri(webId)[:encode_uri(clientId)]`,
@@ -21,7 +21,7 @@ export class JwtVerifier implements Verifier {
   ) {}
 
   /** @inheritdoc */
-  public async verify(credential: Credential, claimSet: ClaimSet = {}): Promise<ClaimSet> {
+  public async verify(credential: Credential): Promise<ClaimSet> {
     this.logger.debug(`Verifying credential ${JSON.stringify(credential)}`);
     if (credential.format !== JWT) {
       throw new Error(`Token format '${credential.format}' does not match this processor's format.`);
@@ -53,21 +53,17 @@ export class JwtVerifier implements Verifier {
       await jwtVerify(credential.token, Object.assign(jwk, { type: 'JWK' }));
     }
 
-    // Only include allowed claims, and add them to the claimSet as arrays
     for (const claim of Object.keys(claims)) {
       if (!this.allowedClaims.includes(claim)) {
         if (this.errorOnExtraClaims) {
           throw new Error(`Claim '${claim}' not allowed.`);
         }
-        continue;
-      }
 
-      const value = (claims as Record<string, unknown>)[claim];
-      claimSet[claim] = claimSet[claim] ?? [];
-      (claimSet[claim] as unknown[]).push(value);
+        delete claims[claim];
+      }
     }
 
-    this.logger.debug(`Returning discovered claims: ${JSON.stringify(claimSet)}`)
-    return claimSet;
+    this.logger.debug(`Returning discovered claims: ${JSON.stringify(claims)}`)
+    return claims;
   }
 }

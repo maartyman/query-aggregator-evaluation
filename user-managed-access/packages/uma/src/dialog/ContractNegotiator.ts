@@ -1,4 +1,5 @@
-import { createErrorMessage, getLoggerFor, KeyValueStorage } from '@solid/community-server';
+import { createErrorMessage, KeyValueStorage } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
 import { Requirements } from '../credentials/Requirements';
 import { Verifier } from '../credentials/verify/Verifier';
 import { ContractManager } from '../policies/contracts/ContractManager';
@@ -6,6 +7,7 @@ import { TicketingStrategy } from '../ticketing/strategy/TicketingStrategy';
 import { Ticket } from '../ticketing/Ticket';
 import { AccessToken } from '../tokens/AccessToken';
 import { TokenFactory } from '../tokens/TokenFactory';
+import { RegistrationStore } from '../util/RegistrationStore';
 import { processRequestPermission, switchODRLandCSSPermission } from '../util/rdf/RequestProcessing';
 import { Result, Success } from '../util/Result';
 import { reType } from '../util/ReType';
@@ -14,7 +16,6 @@ import { Permission } from '../views/Permission';
 import { BaseNegotiator } from './BaseNegotiator';
 import { DialogInput } from './Input';
 import { DialogOutput } from './Output';
-import {ResourceDescription} from "../views/ResourceDescription";
 
 /**
  * A mocked Negotiator for demonstration purposes to display contract negotiation
@@ -30,16 +31,15 @@ export class ContractNegotiator extends BaseNegotiator {
    * @param ticketStore - A KeyValueStore to track Tickets.
    * @param ticketingStrategy - The strategy describing the life cycle of a Ticket.
    * @param tokenFactory - A factory for minting Access Tokens.
-   * @param resourceStore
    */
   public constructor(
     protected verifier: Verifier,
     protected ticketStore: KeyValueStorage<string, Ticket>,
     protected ticketingStrategy: TicketingStrategy,
     protected tokenFactory: TokenFactory,
-    protected readonly resourceStore: KeyValueStorage<string, ResourceDescription>,
+    protected registrationStore?: RegistrationStore,
   ) {
-    super(verifier, ticketStore, ticketingStrategy, tokenFactory, resourceStore);
+    super(verifier, ticketStore, ticketingStrategy, tokenFactory, registrationStore);
     this.logger.warn('The Contract Negotiator is for demonstration purposes only! DO NOT USE THIS IN PRODUCTION !!!');
   }
 
@@ -63,16 +63,20 @@ export class ContractNegotiator extends BaseNegotiator {
     const updatedTicket = await this.processCredentials(input, ticket);
     this.logger.debug(`Processed credentials ${JSON.stringify(updatedTicket)}`);
 
+    if (!this.hasRequiredDerivationClaims(updatedTicket)) {
+      return await this.denyRequest(updatedTicket);
+    }
+
     // TODO:
     const result = await this.toContract(updatedTicket);
 
     if (result.success) {
       // TODO:
-      return this.toResponse(result.value);
+      return this.addDerivationResourceOwner(input, updatedTicket, await this.toResponse(result.value));
     }
 
     // ... on failure, deny if no solvable requirements
-    this.denyRequest(ticket);
+    return await this.denyRequest(updatedTicket);
   }
 
   /**
@@ -165,23 +169,7 @@ export class ContractNegotiator extends BaseNegotiator {
     // Store created instantiated policy (above contract variable) in the pod storage as an instantiated policy
     // todo: dynamic URL
     // todo: fix instantiated from url
-    // contract['http://www.w3.org/ns/prov#wasDerivedFrom'] = [ 'urn:ucp:be-gov:policy:d81b8118-af99-4ab3-b2a7-63f8477b6386 ']
     // TODO: test-private error: this container does not exist and unauth does not have append perms
-    try {
-      const instantiatedPolicyContainer = 'http://localhost:3000/ruben/settings/policies/instantiated/';
-      const policyCreationResponse = await fetch(instantiatedPolicyContainer, {
-        method: 'POST',
-        headers: { 'content-type': 'application/ld+json' },
-        body: JSON.stringify(contract),
-      });
-
-      if (policyCreationResponse.status !== 201) {
-        this.logger.warn(`Adding the contract to the instantiated policies failed: ${
-          policyCreationResponse.status} - ${await policyCreationResponse.text()}`);
-      }
-    } catch (error: unknown) {
-      this.logger.warn(`Adding the contract to the instantiated policies failed: ${createErrorMessage(error)}`);
-    }
 
     // TODO:: dynamic contract link to stored signed contract.
     // If needed we can always embed here directly into the return JSON

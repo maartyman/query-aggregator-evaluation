@@ -14,6 +14,8 @@ export const DialogOutput = ({
     access_token: string,
     token_type: string,
   }),
+  derivation_resource_owner: $(string),
+  derivation_resource_assignee: $(string),
 });
 
 /**

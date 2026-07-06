@@ -110,13 +110,9 @@ func fetchAccessToken(tokenEndpoint string, request interface{}, claims []claimT
 		"scope":      "urn:knows:uma:scopes:derivation-creation",
 	}
 
-	// Single vs multi claim representation to mimic reference implementation.
-	if len(claims) == 1 {
-		body["claim_token"] = claims[0].ClaimToken
-		body["claim_token_format"] = claims[0].ClaimTokenFormat
-	} else {
-		body["claim_tokens"] = claims
-	}
+	claim := serializeClaims(claims)
+	body["claim_token"] = claim.ClaimToken
+	body["claim_token_format"] = claim.ClaimTokenFormat
 
 	switch v := request.(type) {
 	case string: // ticket
@@ -214,6 +210,30 @@ func gatherClaims(existing []claimToken, required []requiredClaim) ([]claimToken
 	return claims, nil
 }
 
+func serializeClaims(claims []claimToken) claimToken {
+	var accessTokens []string
+	for _, claim := range claims {
+		if claim.ClaimTokenFormat == "urn:ietf:params:oauth:token-type:access_token" {
+			accessTokens = append(accessTokens, claim.ClaimToken)
+		}
+	}
+	if len(accessTokens) == 1 {
+		return claimToken{
+			ClaimToken:       accessTokens[0],
+			ClaimTokenFormat: "urn:ietf:params:oauth:token-type:access_token",
+		}
+	}
+	if len(accessTokens) > 1 {
+		encoded, _ := json.Marshal(accessTokens)
+		return claimToken{
+			ClaimToken:       string(encoded),
+			ClaimTokenFormat: "urn:ietf:params:oauth:token-type:access_token",
+		}
+	}
+
+	return claims[len(claims)-1]
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -258,7 +278,8 @@ func updateUpstreamDerivationResource(config uma2Config, entry DerivationEntry, 
 		"name":            entry.DerivationResourceID,
 		"type":            "https://w3id.org/aggregator#DerivedResource",
 		"description":     "Derived resource source for " + sourceURL,
-		"resource_scopes": []string{"urn:knows:uma:scopes:derivation-read"},
+		"source_url":      sourceURL,
+		"resource_scopes": []string{"urn:example:css:modes:read"},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

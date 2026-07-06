@@ -1,6 +1,6 @@
 {
   "@context": [
-    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^7.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@solid/community-server/^8.0.0/components/context.jsonld",
     "https://linkedsoftwaredependencies.org/bundles/npm/@solidlab/uma-css/^0.0.0/components/context.jsonld"
   ],
   "import": [
@@ -9,7 +9,7 @@
     "css:config/app/variables/default.json",
     "css:config/http/handler/default.json",
     "css:config/http/middleware/default.json",
-    "css:config/http/notifications/disabled.json",
+    "css:config/http/notifications/all.json",
     "css:config/http/server-factory/http.json",
     "css:config/http/static/default.json",
     "css:config/identity/access/public.json",

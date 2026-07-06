@@ -1,8 +1,11 @@
-import { InternalServerError, getLoggerFor, type JwkGenerator } from '@solid/community-server';
-import type { Fetcher } from './Fetcher';
+import { InternalServerError, type JwkGenerator } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
 import { httpbis, type SigningKey } from 'http-message-signatures';
+import { BufferSource } from 'node:stream/web';
+import type { Fetcher, FetchParams } from './Fetcher';
 
 const algMap = {
+  'Ed25519': { name: 'Ed25519' },
   'ES256': { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' },
   'ES384': { name: 'ECDSA', namedCurve: 'P-384', hash: 'SHA-384' },
   'ES512': { name: 'ECDSA', namedCurve: 'P-512', hash: 'SHA-512' },
@@ -15,7 +18,7 @@ const algMap = {
   'RS256': { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
   'RS384': { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-384' },
   'RS512': { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' },
-}
+} as const;
 
 /**
  * A {@link Fetcher} wrapper that signes requests.
@@ -29,12 +32,14 @@ export class SignedFetcher implements Fetcher {
     protected keyGen: JwkGenerator,
   ) {}
 
-  public async fetch(input: RequestInfo, init?: RequestInit): Promise<Response> {
+  public async fetch(...[ input, init ]: FetchParams): Promise<Response> {
     const jwk = await this.keyGen.getPrivateKey();
 
     const { alg, kid } = jwk;
     if (alg === 'EdDSA') throw new InternalServerError('EdDSA signing is not supported');
-    if (alg === 'ES256K') throw new InternalServerError('ES256K signing is not supported');
+    if (alg === 'ML-DSA-44') throw new InternalServerError('ML-DSA-44 signing is not supported');
+    if (alg === 'ML-DSA-65') throw new InternalServerError('ML-DSA-65 signing is not supported');
+    if (alg === 'ML-DSA-87') throw new InternalServerError('ML-DSA-87 signing is not supported');
 
     const key: SigningKey = {
       id: kid,

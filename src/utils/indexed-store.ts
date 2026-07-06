@@ -77,6 +77,14 @@ export class IndexedStore {
     return sources.map(source => this.get(source));
   }
 
+  getMerged(sources: string[]): Store {
+    const merged = new Store();
+    for (const source of sources) {
+      merged.addQuads(this.get(source).getQuads(null, null, null, null));
+    }
+    return merged;
+  }
+
   getAll(): Store[] {
     return [...this.stores.values()];
   }

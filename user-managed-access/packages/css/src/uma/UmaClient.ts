@@ -1,6 +1,5 @@
 import {
   AccessMap,
-  getLoggerFor,
   IdentifierStrategy,
   InternalServerError,
   isContainerIdentifier,
@@ -11,11 +10,16 @@ import {
   ResourceSet,
   SingleThreaded
 } from '@solid/community-server';
+import { PERMISSIONS } from '@solidlab/policy-engine';
 import type { ResourceDescription } from '@solidlab/uma';
 import { EventEmitter, once } from 'events';
+import { getLoggerFor } from 'global-logger-factory';
 import { createRemoteJWKSet, decodeJwt, JWTPayload, jwtVerify, JWTVerifyOptions } from 'jose';
 import { promises } from 'node:timers';
+import { VocabularyValue } from 'rdf-vocabulary';
 import type { Fetcher } from '../util/fetch/Fetcher';
+import { MODES } from '../util/Vocabularies';
+import { toUmaScope } from './ScopeUtil';
 
 export interface Claims {
   [key: string]: unknown;
@@ -35,11 +39,19 @@ export type UmaClaims = JWTPayload & {
 
 export interface UmaConfig {
   jwks_uri: string;
-  // jwks: any;
   issuer: string;
   permission_endpoint: string;
   introspection_endpoint: string;
   resource_registration_endpoint: string;
+  token_endpoint: string,
+  registration_endpoint: string,
+}
+
+interface TokenResponse {
+  access_token: string,
+  refresh_token: string,
+  token_type: string,
+  expires_in: number,
 }
 
 export type UmaVerificationOptions = Omit<JWTVerifyOptions, 'iss' | 'aud' | 'sub' | 'iat'>;
@@ -68,11 +80,15 @@ export class UmaClient implements SingleThreaded {
   // Used to notify when registration finished for a resource. The event will be the identifier of the resource.
   protected readonly registerEmitter: EventEmitter = new EventEmitter();
 
+  protected readonly configCache: NodeJS.Dict<{ config: UmaConfig, expiration: number }> = {};
+  protected readonly patStorage: NodeJS.Dict<{ pat: string, expiration: number }> = {};
+
   /**
    * @param umaIdStore - Key/value store containing the resource path -> UMA ID bindings.
    * @param fetcher - Used to perform requests targeting the AS.
    * @param identifierStrategy - Utility functions based on the path configuration of the server.
    * @param resourceSet - Will be used to verify existence of resources.
+   * @param baseUrl - The base URL of this server.
    * @param options - JWT verification options.
    */
   constructor(
@@ -80,6 +96,7 @@ export class UmaClient implements SingleThreaded {
     protected readonly fetcher: Fetcher,
     protected readonly identifierStrategy: IdentifierStrategy,
     protected readonly resourceSet: ResourceSet,
+    protected readonly baseUrl: string,
     protected readonly options: UmaVerificationOptions = {},
   ) {
     // This number can potentially get very big when seeding a bunch of pods.
@@ -87,15 +104,61 @@ export class UmaClient implements SingleThreaded {
     this.registerEmitter.setMaxListeners(20);
   }
 
+  public async getPat(issuer: string, credentials: string): Promise<string> {
+    const cached = this.patStorage[credentials];
+    if (cached && cached.expiration > Date.now()) {
+      return cached.pat;
+    }
+
+    const config = await this.fetchUmaConfig(issuer);
+    const response = await this.fetcher.fetch(config.token_endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: credentials,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials&scope=uma_protection',
+    });
+    if (response.status !== 201) {
+      throw new InternalServerError(`Unable to generate PAT: ${response.status} - ${await response.text()}`);
+    }
+
+    const { access_token, token_type, expires_in } = await response.json() as TokenResponse;
+    this.logger.info(`Generated PAT ${access_token}`);
+    const pat = `${token_type} ${access_token}`;
+    const expiration = Date.now() + expires_in * 1000;
+    this.patStorage[credentials] = { pat, expiration };
+
+    return pat;
+  }
+
+  public async generateClientCredentials(webId: string, issuer: string): Promise<{ id: string, secret: string }> {
+    const config = await this.fetchUmaConfig(issuer);
+    const response = await this.fetcher.fetch(config.registration_endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `WebID ${encodeURIComponent(webId)}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ client_uri: this.baseUrl }),
+    });
+    if (response.status !== 201) {
+      throw new InternalServerError(`Something went wrong generating PAT credentials: ${response.status} - ${
+        await response.text()}`);
+    }
+    const { client_id, client_secret } = await response.json() as { client_id: string, client_secret: string };
+    return { id: client_id, secret: client_secret };
+  }
+
   /**
    * Method to fetch a ticket from the Permission Registration endpoint of the UMA Authorization Service.
    *
    * @param {AccessMap} permissions - the access targets and modes for which a ticket is requested
-   * @param {string} owner - the resource owner of the requested target resources
    * @param {string} issuer - the issuer from which to request the permission ticket
+   * @param {string} credentials - credentials the server should use to acquire a PAT
    * @return {Promise<string>} - the permission ticket
    */
-  public async fetchTicket(permissions: AccessMap, issuer: string): Promise<string | undefined> {
+  public async fetchTicket(permissions: AccessMap, issuer: string, credentials: string): Promise<string | undefined> {
     let endpoint: string;
 
     try {
@@ -121,7 +184,7 @@ export class UmaClient implements SingleThreaded {
         // This can be a consequence of adding resources in the wrong way (e.g., copying files),
         // or other special resources, such as derived resources.
         if (await this.resourceSet.hasResource(target)) {
-          await this.registerResource(target, issuer);
+          await this.registerResource(target, issuer, credentials);
           umaId = await this.umaIdStore.get(target.path);
         } else {
           throw new NotFoundHttpError();
@@ -133,13 +196,15 @@ export class UmaClient implements SingleThreaded {
       }
       body.push({
         resource_id: umaId,
-        resource_scopes: Array.from(modes).map(mode => `urn:example:css:modes:${mode}`)
+        resource_scopes: (Array.from(modes) as VocabularyValue<typeof PERMISSIONS>[]).map(toUmaScope),
       });
     }
 
+    const pat = await this.getPat(issuer, credentials);
     const response = await this.fetcher.fetch(endpoint, {
       method: 'POST',
       headers: {
+        'Authorization': pat,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
@@ -152,7 +217,7 @@ export class UmaClient implements SingleThreaded {
       throw new Error(`Error while retrieving UMA Ticket: Received status ${response.status} from '${endpoint}'.`);
     }
 
-    const json = await response.json();
+    const json = await response.json() as { ticket?: unknown } ;
 
     if (!json.ticket || !isString(json.ticket)) {
       throw new Error('Invalid response from UMA AS: missing or invalid \'ticket\'.');
@@ -231,7 +296,7 @@ export class UmaClient implements SingleThreaded {
       throw new Error(`Unable to introspect UMA RPT for Authorization Server '${config.issuer}'`);
     }
 
-    const jwt = await res.json();
+    const jwt = await res.json() as any;
     if (jwt.active !== 'true') throw new Error(`The provided UMA RPT is not active.`);
 
     return await this.verifyTokenData(jwt, config.issuer, config.jwks_uri);
@@ -243,6 +308,11 @@ export class UmaClient implements SingleThreaded {
    * @return {Promise<UmaConfig>} - UMA Configuration
    */
   public async fetchUmaConfig(issuer: string): Promise<UmaConfig> {
+    const cached = this.configCache[issuer];
+    if (cached && cached.expiration > Date.now()) {
+      return cached.config;
+    }
+
     const configUrl = issuer + UMA_DISCOVERY;
     const res = await this.fetcher.fetch(configUrl);
 
@@ -250,7 +320,7 @@ export class UmaClient implements SingleThreaded {
       throw new Error(`Unable to retrieve UMA Configuration for Authorization Server '${issuer}' from '${configUrl}'`);
     }
 
-    const configuration = await res.json();
+    const configuration = await res.json() as Record<string, unknown>;
 
     const missing = REQUIRED_METADATA.filter((value) => !(value in configuration));
     if (missing.length !== 0) {
@@ -262,7 +332,10 @@ export class UmaClient implements SingleThreaded {
       `The Authorization Server Metadata of '${issuer}' should have string attributes ${noString.join(', ')}`
     );
 
-    return configuration;
+    const typedConfig = configuration as unknown as UmaConfig;
+    this.configCache[issuer] = { config: typedConfig, expiration: Date.now() + 5 * 60 * 1000 };
+
+    return typedConfig;
   }
 
   /**
@@ -276,13 +349,18 @@ export class UmaClient implements SingleThreaded {
    * In that case the registration will be done immediately,
    * and updated with the relations once the parent registration is finished.
    */
-  public async registerResource(resource: ResourceIdentifier, issuer: string): Promise<void> {
+  public async registerResource(resource: ResourceIdentifier, issuer: string, credentials: string): Promise<void> {
+    if (this.identifierStrategy.isRootContainer(resource)) {
+      this.logger.debug(`Skipping UMA registration for root container <${resource.path}>.`);
+      return;
+    }
+
     if (this.inProgressResources.has(resource.path)) {
       // It is possible a resource is still being registered when an updated registration is already requested.
       // To prevent duplicate registrations of the same resource,
       // the next call will only happen when the first one is finished.
       await once(this.registerEmitter, resource.path);
-      return this.registerResource(resource, issuer);
+      return this.registerResource(resource, issuer, credentials);
     }
     this.inProgressResources.add(resource.path);
     let { resource_registration_endpoint: endpoint } = await this.fetchUmaConfig(issuer);
@@ -294,11 +372,11 @@ export class UmaClient implements SingleThreaded {
     const description: ResourceDescription = {
       name: resource.path,
       resource_scopes: [
-        'urn:example:css:modes:read',
-        'urn:example:css:modes:append',
-        'urn:example:css:modes:create',
-        'urn:example:css:modes:delete',
-        'urn:example:css:modes:write',
+        MODES.read,
+        MODES.append,
+        MODES.create,
+        MODES.delete,
+        MODES.write,
       ],
     };
 
@@ -306,11 +384,13 @@ export class UmaClient implements SingleThreaded {
       description.resource_defaults = { 'http://www.w3.org/ns/ldp#contains': description.resource_scopes };
     }
 
+    const pat = await this.getPat(issuer, credentials);
+
     // This function can potentially cause multiple asynchronous calls to be required.
     // These will be stored in this array so they can be executed simultaneously.
     const promises: Promise<void>[] = [];
-    if (!this.identifierStrategy.isRootContainer(resource)) {
-      const parentIdentifier = this.identifierStrategy.getParentContainer(resource);
+    const parentIdentifier = this.identifierStrategy.getParentContainer(resource);
+    if (!this.identifierStrategy.isRootContainer(parentIdentifier)) {
       const parentId = await this.umaIdStore.get(parentIdentifier.path);
       if (parentId) {
         description.resource_relations = { '@reverse': { 'http://www.w3.org/ns/ldp#contains': [ parentId ] } };
@@ -320,12 +400,12 @@ export class UmaClient implements SingleThreaded {
 
         promises.push(
           once(this.registerEmitter, parentIdentifier.path)
-            .then(() => this.registerResource(resource, issuer)),
+            .then(() => this.registerResource(resource, issuer, credentials)),
         );
         // It is possible the parent is not yet being registered.
         // We need to force a registration in such a case, otherwise the above event will never be fired.
         if (!this.inProgressResources.has(parentIdentifier.path)) {
-          promises.push(this.registerResource(parentIdentifier, issuer));
+          promises.push(this.registerResource(parentIdentifier, issuer, credentials));
         }
       }
     }
@@ -339,6 +419,7 @@ export class UmaClient implements SingleThreaded {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        'Authorization': pat,
       },
       body: JSON.stringify(description),
     };
@@ -353,7 +434,7 @@ export class UmaClient implements SingleThreaded {
           throw new InternalServerError(`Resource registration request failed. ${await resp.text()}`);
         }
 
-        const { _id: umaId } = await resp.json();
+        const { _id: umaId } = await resp.json() as { _id: string };
 
         if (!isString(umaId)) {
           throw new InternalServerError('Unexpected response from UMA server; no UMA id received.');
@@ -375,7 +456,7 @@ export class UmaClient implements SingleThreaded {
   /**
    * Deletes the UMA registration for the given resource from the given issuer.
    */
-  public async deleteResource(resource: ResourceIdentifier, issuer: string): Promise<void> {
+  public async deleteResource(resource: ResourceIdentifier, issuer: string, credentials: string): Promise<void> {
     const { resource_registration_endpoint: endpoint } = await this.fetchUmaConfig(issuer);
 
     const umaId = await this.umaIdStore.get(resource.path);
@@ -386,7 +467,8 @@ export class UmaClient implements SingleThreaded {
 
     this.logger.info(`Deleting resource registration for <${resource.path}> at <${url}>`);
 
-    await this.fetcher.fetch(url, { method: 'DELETE' });
+    const pat = await this.getPat(issuer, credentials);
+    await this.fetcher.fetch(url, { method: 'DELETE', headers: { Authorization: pat } });
   }
 }
 

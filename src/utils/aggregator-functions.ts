@@ -1,5 +1,6 @@
 import {Auth} from "./auth";
 const aggregatorUrl = "http://localhost:5000/";
+const aggregatorUmaIssuer = "http://localhost:4000/uma";
 const availableServiceRel = "https://w3id.org/aggregator#availableService";
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type FetchClient = Auth | FetchLike;
@@ -19,7 +20,13 @@ export async function createAggregatorService(auth: Auth, FnoDescription: string
   if (!response.ok) {
   throw new Error(`Failed to configure aggregator: ${await response.text()}`);
 }
-return (await response.json()).id;
+const id = (await response.json()).id;
+await auth.createUmaPolicyForTargets([
+  `${aggregatorUrl}${id}`,
+  `${aggregatorUrl}${id}/`,
+  `${aggregatorUrl}config/actors/${id}`,
+], aggregatorUmaIssuer);
+return id;
 }
 
 export async function registerAggregatorServiceDescription(auth: Auth, FnoDescription: string): Promise<string> {

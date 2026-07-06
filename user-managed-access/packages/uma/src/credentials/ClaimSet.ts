@@ -4,4 +4,4 @@
  *
  * TODO: Might exchange this for a QuadStore?
  */
-export type ClaimSet = NodeJS.Dict<unknown[]>;
+export type ClaimSet = NodeJS.Dict<unknown>;

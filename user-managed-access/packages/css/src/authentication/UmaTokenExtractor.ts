@@ -1,7 +1,14 @@
 import {
-  CredentialsExtractor, getLoggerFor, HttpRequest,
-  NotImplementedHttpError, BadRequestHttpError, Credentials, TargetExtractor, createErrorMessage
+  BadRequestHttpError,
+  createErrorMessage,
+  Credentials,
+  CredentialsExtractor,
+  HttpRequest,
+  NotImplementedHttpError,
+  TargetExtractor,
 } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
+import { decodeJwt } from 'jose';
 import { UmaClaims, UmaClient } from '../uma/UmaClient';
 import { OwnerUtil } from '../util/OwnerUtil';
 
@@ -46,10 +53,7 @@ export class UmaTokenExtractor extends CredentialsExtractor {
     if (!token) throw new BadRequestHttpError('Found empty Bearer token.');
 
     try {
-      const target = await this.targetExtractor.handleSafe({ request });
-      const owners = await this.ownerUtil.findOwners(target);
-      const issuers = await Promise.all(owners.map(o => this.ownerUtil.findIssuer(o)))
-      const validIssuers = issuers.filter((i): i is string => i !== undefined);
+      const validIssuers = await this.findValidIssuers(request, token);
 
       if (this.introspect) {
         this.logger.debug('Performing token introspection.');
@@ -71,5 +75,25 @@ export class UmaTokenExtractor extends CredentialsExtractor {
       this.logger.warn(msg);
       throw new BadRequestHttpError(msg, {cause: error});
     }
+  }
+
+  protected async findValidIssuers(request: HttpRequest, token: string): Promise<string[]> {
+    try {
+      const target = await this.targetExtractor.handleSafe({ request });
+      const owners = await this.ownerUtil.findOwners(target);
+      const issuers = await Promise.all(owners.map(async o => (await this.ownerUtil.findUmaSettings(o)).issuer));
+      return issuers.filter((i): i is string => i !== undefined);
+    } catch (error: unknown) {
+      this.logger.debug(`Unable to find target owners while validating UMA token: ${createErrorMessage(error)}`);
+    }
+
+    const issuer = decodeJwt(token).iss;
+    if (!issuer) {
+      throw new Error('The JWT does not contain an "iss" parameter.');
+    }
+    if (typeof issuer !== 'string') {
+      throw new Error('The JWT "iss" parameter is not a string.');
+    }
+    return [ issuer ];
   }
 }

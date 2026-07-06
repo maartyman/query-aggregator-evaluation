@@ -3,14 +3,22 @@
 export * from './credentials/ClaimSet';
 export * from './credentials/Requirements';
 export * from './credentials/Credential';
+export * from './credentials/CredentialParser';
+export * from './credentials/Formats';
+
+// Derivation
+export * from './derivation/Derivation';
+
+// CredentialParsers
+export * from './credentials/parse/MappedSchemeParser';
 
 // Verifiers
 export * from './credentials/verify/Verifier';
 export * from './credentials/verify/TypedVerifier';
 export * from './credentials/verify/UnsecureVerifier';
-export * from './credentials/verify/SolidOidcVerifier';
+export * from './credentials/verify/OidcVerifier';
 export * from './credentials/verify/JwtVerifier';
-export * from './credentials/verify/AccessTokenVerifier';
+export * from './credentials/verify/IriVerifier';
 
 // Dialog
 export * from './dialog/Input';
@@ -22,12 +30,10 @@ export * from './dialog/ContractNegotiator';
 // Authorizers
 export * from './policies/authorizers/Authorizer';
 export * from './policies/authorizers/AllAuthorizer';
-export * from './policies/authorizers/AllWebIdAuthorizer';
 export * from './policies/authorizers/NamespacedAuthorizer';
 export * from './policies/authorizers/NoneAuthorizer';
 export * from './policies/authorizers/OdrlAuthorizer';
 export * from './policies/authorizers/WebIdAuthorizer';
-export * from './policies/authorizers/DerivedFromAuthorizer';
 
 // Contracts
 export * from './policies/contracts/ContractManager';
@@ -39,11 +45,14 @@ export * from './routes/Introspection';
 export * from './routes/Jwks';
 export * from './routes/Ticket';
 export * from './routes/ResourceRegistration';
+export * from './routes/ResourceOwnerAssets';
 export * from './routes/Token';
 export * from './routes/Config';
 export * from './routes/Log';
 export * from './routes/VC';
 export * from './routes/Contract';
+export * from './routes/BaseHandler';
+export * from './routes/ClientRegistration';
 
 // Tickets
 export * from './ticketing/Ticket';
@@ -70,9 +79,32 @@ export * from './util/http/server/JsonHttpErrorHandler';
 export * from './util/http/server/JsonFormHttpHandler';
 export * from './util/http/server/NodeHttpRequestResponseHandler';
 export * from './util/http/server/RoutedHttpRequestHandler';
+export * from './util/http/validate/CompositeRequestValidator';
+export * from './util/http/validate/HttpMessageValidator';
+export * from './util/http/validate/DerivationManagementTokenValidator';
+export * from './util/http/validate/PatRequestValidator';
+export * from './util/http/validate/RequestValidator';
+
+// UCP
+export * from './ucp/policy/ODRL';
+export * from './ucp/policy/UsageControlPolicy';
+export * from './ucp/storage/ContainerUCRulesStorage';
+export * from './ucp/storage/DirectoryUCRulesStorage';
+export * from './ucp/storage/FileBackupUCRulesStorage';
+export * from './ucp/storage/MemoryUCRulesStorage';
+export * from './ucp/storage/UCRulesStorage';
+export * from './ucp/util/Util';
+export * from './ucp/util/Vocabularies';
 
 // Util
 export * from './util/ConvertUtil';
 export * from './util/HttpMessageSignatures';
+export * from './util/RegistrationStore';
+export * from './util/ResourceOwnerAssetEvents';
 export * from './util/Result';
 export * from './util/ReType';
+
+// Controllers
+export * from './controller/BaseController';
+export * from './controller/AccessRequestController';
+export * from './controller/PolicyRequestController';

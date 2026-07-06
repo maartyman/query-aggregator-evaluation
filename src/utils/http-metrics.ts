@@ -39,6 +39,9 @@ export function classifyHttpRequest(input: string | URL | Request): HttpRequestK
     url.includes('/.account/') ||
     url.includes('/.oidc/token') ||
     url.includes('/.well-known/uma2-configuration') ||
+    url.includes('/uma/ticket') ||
+    url.includes('/uma/resources') ||
+    url.includes('/uma/keys') ||
     url.endsWith('/token') ||
     url.includes('/token?') ||
     url.includes('service-token')

@@ -38,12 +38,6 @@ const argv = yargs(hideBin(process.argv))
     choices: [ 'no-auth', 'nondelegated', 'delegated' ],
     description: 'Precompiled authorization mode'
   })
-  .option('backupFilePath', {
-    alias: 'f',
-    type: 'string',
-    description: 'Backup file path for the UMA server',
-    default: ''
-  })
   .option('resourceRegistrationAuthorizedWebId', {
     type: 'string',
     description: 'WebID that receives all registered scopes for every registered resource',
@@ -77,7 +71,6 @@ async function main() {
     'urn:uma:variables:port': argv.port,
     'urn:uma:variables:baseUrl': argv.baseUrl,
     'urn:uma:variables:eyePath': 'eye',
-    'urn:uma:variables:backupFilePath': argv.backupFilePath,
     'urn:uma:variables:resourceRegistrationAuthorizedWebId': argv.resourceRegistrationAuthorizedWebId,
   };
 

@@ -1,8 +1,17 @@
 import {EventEmitter} from "node:events";
+import {randomUUID} from "node:crypto";
 import {fetch} from 'cross-fetch';
 import {PodContext} from "../data-generator";
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import type {
+  Auth as TrustflowsAuth,
+  Claim,
+  ClaimResolutionContext,
+  ClaimResolverDefinition,
+  RequiredClaims,
+  SuccessfulTokenResponse,
+} from 'trustflows-client';
 import {Logger} from './logger';
 import {
   classifyHttpRequest,
@@ -23,31 +32,35 @@ export interface ObservedHttpRequest {
   error?: string;
 }
 
-let saveCacheLock: Promise<void> = Promise.resolve();
+type TrustflowsClientModule = typeof import('trustflows-client');
+
 let requestObserver: ((request: ObservedHttpRequest) => void) | undefined;
+let trustflowsClientPromise: Promise<TrustflowsClientModule> | undefined;
+
+const dynamicImport = new Function('specifier', 'return import(specifier)') as
+  (specifier: string) => Promise<TrustflowsClientModule>;
+
+function loadTrustflowsClient(): Promise<TrustflowsClientModule> {
+  trustflowsClientPromise ??= dynamicImport('trustflows-client');
+  return trustflowsClientPromise;
+}
 
 export class Auth {
   private readonly podContext: PodContext;
   private readonly cssBase: string;
-  private authString: string | undefined;
   private accessToken: string | undefined;
+  private trustflowsAuth: TrustflowsAuth | undefined;
   private activeRequests = 0;
   private readonly maxConcurrentRequests = 30;
   private requestQueue: Array<() => void> = [];
-
-  private readonly cacheEnabled: boolean;
-  private readonly cacheFilePath: string;
-  private umaPermissionTokens: Map<string, {
-    token_type: string;
-    access_token: string;
-  }> = new Map();
+  private derivationClaimRequestCount = 0;
 
   constructor(podContext: PodContext, options?: { enableCache?: boolean; cacheFilePath?: string }) {
     this.podContext = podContext;
     this.cssBase = podContext.server.solidBaseUrl.replace(/\/$/, '');
-    this.cacheEnabled = options?.enableCache ?? false;
-    this.cacheFilePath = options?.cacheFilePath ?? path.join(process.cwd(), '.cache');
-    Logger.debug('Initialized Auth with cache:', this.cacheEnabled, 'cacheFilePath:', this.cacheFilePath);
+    if (options?.enableCache || options?.cacheFilePath) {
+      Logger.debug('Ignoring Auth token cache option; token caching is disabled for experiments');
+    }
   }
 
   public static setRequestObserver(observer?: (request: ObservedHttpRequest) => void): void {
@@ -64,56 +77,77 @@ export class Auth {
     }
   }
 
-  private async loadCache(): Promise<void> {
-    if (!this.cacheEnabled) return;
-    try {
-      const raw = await fsp.readFile(this.cacheFilePath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && parsed.umaPermissionTokens) {
-        for (const [key, entry] of Object.entries(parsed.umaPermissionTokens)) {
-          const tokenEntry = entry as { token_type: string; access_token: string; expires_at?: number };
-          if (tokenEntry && tokenEntry.access_token) {
-            this.umaPermissionTokens.set(key, tokenEntry);
-          }
-        }
-        Logger.debug('Loaded token cache from disk', this.cacheFilePath);
-      }
-    } catch (e: any) {
-      if (e?.code !== 'ENOENT') {
-        Logger.warn(`Token cache load failed: ${e?.message ?? String(e)}`);
-      } else {
-        Logger.debug('No existing cache file found at', this.cacheFilePath);
-      }
-    }
-  }
-
-  private async saveCache(): Promise<void> {
-    if (!this.cacheEnabled) return;
-
-    saveCacheLock = saveCacheLock.then(async () => {
-      const tmp = `${this.cacheFilePath}.tmp`;
-      const obj: Record<string, any> = {};
-      for (const [key, entry] of this.umaPermissionTokens.entries()) {
-        obj[key] = entry;
-      }
-      const data = JSON.stringify({ umaPermissionTokens: obj });
-      await fsp.writeFile(tmp, data, 'utf8');
-      await fsp.rename(tmp, this.cacheFilePath);
-      Logger.debug('Saved token cache to disk', this.cacheFilePath, {
-        tokenCount: this.umaPermissionTokens.size
-      });
+  async init(): Promise<void> {
+    const trustflowsClient = await loadTrustflowsClient();
+    const auth = new trustflowsClient.Auth({
+      fetch: this.throttledFetch.bind(this) as typeof globalThis.fetch,
+      persistTokens: false,
+      claimResolvers: [this.createCountingAccessTokenResolver(trustflowsClient)],
     });
 
-    await saveCacheLock;
+    await auth.loginClientCredentials(this.podContext.webId, this.podContext.email, 'password');
+    auth.webId = auth.webId ?? this.podContext.webId;
+    this.trustflowsAuth = auth;
+    this.accessToken = auth.accessToken;
   }
 
-  async init(): Promise<void> {
-    await this.loadCache();
+  private createCountingAccessTokenResolver(trustflowsClient: TrustflowsClientModule): ClaimResolverDefinition {
+    return {
+      id: 'query-aggregator-evaluation-access-token',
+      match: [
+        {claim_token_format: trustflowsClient.ACCESS_TOKEN_CLAIM_FORMAT},
+        {claim_type: trustflowsClient.ACCESS_TOKEN_CLAIM_FORMAT},
+        {claim_type: trustflowsClient.ACCESS_TOKEN_CLAIM_TYPE},
+      ],
+      priority: 100,
+      groupBy: (required: RequiredClaims): string | undefined =>
+        trustflowsClient.accessTokenIssuer(this.normalizeRequiredClaim(required)),
+      resolve: async (
+        required: RequiredClaims,
+        auth: TrustflowsAuth,
+        context?: ClaimResolutionContext
+      ): Promise<Claim> => {
+        this.derivationClaimRequestCount++;
+        return trustflowsClient.resolveAccessTokenClaims([
+          this.normalizeRequiredClaim(required)
+        ], auth, context);
+      },
+      resolveGroup: async (
+        requiredClaims: RequiredClaims[],
+        auth: TrustflowsAuth,
+        context?: ClaimResolutionContext
+      ): Promise<Claim> => {
+        this.derivationClaimRequestCount += requiredClaims.length;
+        return trustflowsClient.resolveAccessTokenClaims(
+          requiredClaims.map(required => this.normalizeRequiredClaim(required)),
+          auth,
+          context
+        );
+      },
+    };
+  }
 
-    let indexResponse = await fetch(`${this.cssBase}/.account/`);
+  private normalizeRequiredClaim(required: RequiredClaims): RequiredClaims {
+    const details = (required as any).details;
+    return {
+      ...required,
+      issuer: required.issuer ?? details?.issuer,
+      derivation_resource_id: required.derivation_resource_id ?? details?.resource_id,
+      resource_scopes: required.resource_scopes ?? details?.resource_scopes,
+    };
+  }
+
+  private async updatePatCredentialsIfSupported(): Promise<void> {
+    let indexResponse = await this.throttledFetch(`${this.cssBase}/.account/`);
+    if (!indexResponse.ok) {
+      throw new Error('Account API request failed:' + await indexResponse.text());
+    }
     let controls = (await indexResponse.json()).controls;
+    if (!controls?.password?.login) {
+      return;
+    }
 
-    let response = await fetch(controls.password.login, {
+    let response = await this.throttledFetch(controls.password.login, {
       method: 'POST',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({email: this.podContext.email, password: 'password'}),
@@ -123,204 +157,129 @@ export class Auth {
     }
     const {authorization} = await response.json();
 
-    indexResponse = await fetch(`${this.cssBase}/.account/`, {
+    indexResponse = await this.throttledFetch(`${this.cssBase}/.account/`, {
       headers: {authorization: `CSS-Account-Token ${authorization}`},
     });
     if (!indexResponse.ok) {
       throw new Error('Login failed:' + await indexResponse.text());
     }
     controls = (await indexResponse.json()).controls;
+    if (!controls.account?.pat) {
+      return;
+    }
 
-    response = await fetch(controls.account.clientCredentials, {
+    const umaCredentials = await this.createUmaClientCredentials();
+    response = await this.throttledFetch(controls.account.pat, {
       method: 'POST',
       headers: {authorization: `CSS-Account-Token ${authorization}`, 'content-type': 'application/json'},
-      body: JSON.stringify({name: 'my-token', webId: this.podContext.webId}),
+      body: JSON.stringify({
+        id: umaCredentials.id,
+        secret: umaCredentials.secret,
+        issuer: this.podContext.server.umaBaseUrl,
+      }),
     });
-
     if (!response.ok) {
-      throw new Error('Client credentials request failed:' + await response.text());
+      throw new Error('PAT update failed:' + await response.text());
     }
-
-    const {id, secret} = await response.json();
-    this.authString = `${encodeURIComponent(id)}:${encodeURIComponent(secret)}`;
   }
 
-  async getAccessToken(): Promise<void> {
-    if (!this.authString) {
-      throw new Error('Not initialized');
+  private async createUmaClientCredentials(): Promise<{ id: string; secret: string }> {
+    const configResponse = await this.throttledFetch(`${this.podContext.server.umaBaseUrl}/.well-known/uma2-configuration`);
+    if (!configResponse.ok) {
+      throw new Error('UMA configuration request failed:' + await configResponse.text());
+    }
+    const config = await configResponse.json();
+    const registrationEndpoint = config.registration_endpoint;
+    if (!registrationEndpoint) {
+      throw new Error('UMA configuration missing registration_endpoint');
     }
 
-    const response = await fetch(`${this.cssBase}/.oidc/token`, {
+    const response = await this.throttledFetch(registrationEndpoint, {
       method: 'POST',
       headers: {
-        authorization: `Basic ${Buffer.from(this.authString).toString('base64')}`,
-        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `WebID ${encodeURIComponent(this.podContext.webId)}`,
+        'content-type': 'application/json',
       },
-      body: 'grant_type=client_credentials&scope=webid',
+      body: JSON.stringify({ client_uri: `${this.cssBase}/client/${randomUUID()}` }),
     });
-
-    const accessTokenJson = await response.json();
-    this.accessToken = accessTokenJson.access_token;
-  }
-
-  private async fetchAccessToken(
-    tokenEndpoint: string,
-    request: string | Array<{ resource_id: string; resource_scopes: string[] }>,
-    claims?: Array<{ claim_token: string; claim_token_format: string }>
-  ): Promise<{
-    token?: string;
-    tokenType?: string;
-    expiresIn?: number;
-    error?: Error;
-    claimsUsed?: Array<{ claim_token: string; claim_token_format: string }>;
-  }> {
-    let content: any;
-    let claimsUsed = claims ? [...claims] : undefined;
-
-    if (claims) {
-      content = {
-        grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
-        claim_tokens: claims
-      };
-    } else {
-      content = {
-        grant_type: 'urn:ietf:params:oauth:grant-type:uma-ticket',
-        claim_token: this.accessToken,
-        claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken',
-      };
-      claimsUsed = [{
-        claim_token: this.accessToken!,
-        claim_token_format: 'http://openid.net/specs/openid-connect-core-1_0.html#IDToken'
-      }];
+    if (!response.ok) {
+      throw new Error('UMA client registration failed:' + await response.text());
     }
 
-    if (typeof request === 'string') {
-      content.ticket = request;
-    } else {
-      content.permissions = request;
-    }
-
-    const asRequestResponse = await this.throttledFetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(content)
-    });
-
-    if (asRequestResponse.status === 403) {
-      let asRequestResponseJson: any;
-      try {
-        asRequestResponseJson = await asRequestResponse.json();
-      } catch {
-        return {
-          error: new Error('403 without JSON body'),
-          token: undefined,
-          tokenType: undefined,
-          expiresIn: undefined,
-          claimsUsed
-        };
-      }
-
-      try {
-        claimsUsed = await this.gatherClaims(claimsUsed || [], asRequestResponseJson.required_claims);
-      } catch (e: any) {
-        return {
-          error: e,
-          token: undefined,
-          tokenType: undefined,
-          expiresIn: undefined,
-          claimsUsed
-        };
-      }
-
-      return this.fetchAccessToken(tokenEndpoint, asRequestResponseJson.ticket, claimsUsed);
-    }
-
-    if (asRequestResponse.status !== 200) {
-      const text = await asRequestResponse.text();
-      return {
-        error: new Error(`Failed to fetch access token, error: ${text}`),
-        token: undefined,
-        tokenType: undefined,
-        expiresIn: undefined,
-        claimsUsed
-      };
-    }
-
-    const asResponse = await asRequestResponse.json();
+    const credentials = await response.json();
     return {
-      token: asResponse.access_token,
-      tokenType: asResponse.token_type,
-      expiresIn: asResponse.expires_in,
-      error: undefined,
-      claimsUsed
+      id: credentials.client_id,
+      secret: credentials.client_secret,
     };
   }
 
-  private async gatherClaims(
-    claims: Array<{ claim_token: string; claim_token_format: string }>,
-    requiredClaims: Array<any>
-  ): Promise<Array<{ claim_token: string; claim_token_format: string }>> {
-    for (const requiredClaim of requiredClaims) {
-      switch (requiredClaim['claim_token_format']) {
-        case 'urn:ietf:params:oauth:token-type:access_token':
-          const issuer = requiredClaim.issuer ?? requiredClaim.details?.issuer;
-          const resourceId = requiredClaim.derivation_resource_id ?? requiredClaim.details?.resource_id;
-          const resourceScopes = requiredClaim.resource_scopes ?? requiredClaim.details?.resource_scopes;
-          if (!issuer || !resourceId || !resourceScopes) {
-            throw new Error(`Invalid access-token claim requirement: ${JSON.stringify(requiredClaim)}`);
-          }
-          const tokenEndpoint = issuer.replace(/\/$/, '') + '/token';
-          const { token, error } = await this.fetchAccessToken(
-            tokenEndpoint,
-            [{
-              resource_id: resourceId,
-              resource_scopes: resourceScopes
-            }]
-          );
-          if (error) throw error;
-          claims.push({
-            claim_token: token!,
-            claim_token_format: 'urn:ietf:params:oauth:token-type:access_token'
-          });
-          break;
-        default:
-          throw new Error(`Unsupported claim token format: ${requiredClaim['claim_token_format']}`);
-      }
+  async getAccessToken(): Promise<void> {
+    const auth = this.requireTrustflowsAuth();
+    await auth.ensureValidToken();
+    this.accessToken = auth.accessToken;
+    if (!this.accessToken) {
+      throw new Error('Access token not initialized');
     }
-    return claims;
   }
 
-  // Token cache helpers
-  private buildUmaTokenKey(resourceUrl: string, method: string = 'GET'): string {
-    return `${method.toUpperCase()} ${resourceUrl}`;
-  }
+  async createUmaPolicyForTargets(targets: string[], issuer: string = this.podContext.server.umaBaseUrl): Promise<void> {
+    await this.getAccessToken();
 
-  private getStoredUmaToken(resourceUrl: string, method: string = 'GET') {
-    const key = this.buildUmaTokenKey(resourceUrl, method);
-    const entry = this.umaPermissionTokens.get(key);
-    if (!entry) return undefined;
-    return entry;
-  }
+    const policyId = `urn:query-aggregator-evaluation:runtime-policy:${randomUUID()}`;
+    const permissionId = `urn:query-aggregator-evaluation:runtime-permission:${randomUUID()}`;
+    const policy = [
+      '@prefix odrl: <http://www.w3.org/ns/odrl/2/> .',
+      '',
+      `<${policyId}> a odrl:Agreement ;`,
+      `  odrl:uid <${policyId}> ;`,
+      `  odrl:permission <${permissionId}> .`,
+      '',
+      `<${permissionId}> a odrl:Permission ;`,
+      '  odrl:action odrl:use ;',
+      `  odrl:assignee <${this.podContext.webId}> ;`,
+      `  odrl:assigner <${this.podContext.webId}> ;`,
+      `  odrl:target ${targets.map(target => `<${target}>`).join(',\n    ')} .`,
+      '',
+    ].join('\n');
 
-  private async storeUmaToken(resourceUrl: string, method: string, token: { token_type: string; access_token: string; expires_in?: number }) {
-    const key = this.buildUmaTokenKey(resourceUrl, method);
-    this.umaPermissionTokens.set(key, {
-      token_type: token.token_type,
-      access_token: token.access_token
+    const response = await this.throttledFetch(`${issuer}/policies`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.accessToken}`,
+        'content-type': 'text/turtle',
+      },
+      body: policy,
     });
-    await this.saveCache();
+    if (!response.ok && response.status !== 409) {
+      throw new Error('UMA policy creation failed:' + await response.text());
+    }
   }
 
-  private async getTokenEndpoint(asUri: string): Promise<string | undefined> {
-    const uma2ConfigResponse = await this.throttledFetch(`${asUri}/.well-known/uma2-configuration`);
-    if (!uma2ConfigResponse.ok) {
-      Logger.debug('Failed to fetch UMA2 configuration for AS', asUri, uma2ConfigResponse.status);
-      return undefined;
+  getDerivationClaimRequestCount(): number {
+    return this.derivationClaimRequestCount;
+  }
+
+  private requireTrustflowsAuth(): TrustflowsAuth {
+    if (!this.trustflowsAuth) {
+      throw new Error('Not initialized');
     }
+    return this.trustflowsAuth;
+  }
+
+  private async fetchUmaAccessToken(
+    challenge: { as_uri: string; ticket: string }
+  ): Promise<SuccessfulTokenResponse | undefined> {
+    const auth = this.requireTrustflowsAuth();
+    const trustflowsClient = await loadTrustflowsClient();
     try {
-      const uma2Config = await uma2ConfigResponse.json();
-      return uma2Config.token_endpoint as string;
-    } catch {
+      const metadata = await trustflowsClient.discoverUmaConfiguration(challenge.as_uri, auth.getFetch());
+      if (!metadata.token_endpoint) {
+        Logger.debug('Token endpoint unavailable for AS', challenge.as_uri);
+        return undefined;
+      }
+      return await trustflowsClient.fetchAccessToken(auth, metadata.token_endpoint, challenge.ticket);
+    } catch (error) {
+      Logger.debug('Failed to fetch UMA access token', error instanceof Error ? error.message : String(error));
       return undefined;
     }
   }
@@ -425,78 +384,36 @@ export class Auth {
     input: string | URL | Request,
     init?: RequestInit,
   ): Promise<Response> {
+    const auth = this.requireTrustflowsAuth();
+    const trustflowsClient = await loadTrustflowsClient();
     const resourceUrl = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : (input as Request).url);
     const method = init?.method || 'GET';
     Logger.debug('Fetch start', { resourceUrl, method });
+    auth.umaPermissionTokens.clear();
 
-    // Check for cached UMA token
-    const existingUmaToken = this.getStoredUmaToken(resourceUrl, method);
-
-    if (existingUmaToken) {
-      const cachedInit: RequestInit = init ? { ...init } : {};
-      cachedInit.headers = {
-        ...(init?.headers as any),
-        Authorization: `${existingUmaToken.token_type} ${existingUmaToken.access_token}`
-      };
-      Logger.debug('Using cached UMA token for resource', resourceUrl);
-      const response = await this.throttledFetch(input, cachedInit);
-      if (response.status !== 401) {
-        Logger.debug('Cached token worked, status', response.status);
-        return response;
-      }
-      // Cached token failed, remove it and retry
-      Logger.debug('Cached token failed with 401, removing from cache', resourceUrl);
-      this.umaPermissionTokens.delete(this.buildUmaTokenKey(resourceUrl, method));
-    }
-
-    // Try without token or retry without cached token
     const response = await this.throttledFetch(input, init);
     if (response.status !== 401) {
       Logger.debug('Resource accessible without auth, status', response.status);
       return response;
     }
 
-    // Handle UMA challenge
-    const wwwAuthenticateHeader = response.headers.get("WWW-Authenticate");
-    if (!wwwAuthenticateHeader) {
-      Logger.debug('Missing WWW-Authenticate header in 401 response', resourceUrl);
+    const challenge = trustflowsClient.parseUmaAuthenticateHeader(response.headers);
+    if (!challenge?.as_uri || !challenge.ticket) {
+      Logger.debug('Missing or unsupported UMA challenge in 401 response', resourceUrl);
       return response;
     }
-    const {as_uri, ticket} = Object.fromEntries(wwwAuthenticateHeader.replace(/^UMA /, '').split(', ').map(
-      param => param.split('=').map(s => s.replace(/"/g, ''))
-    ));
-    Logger.debug('Received UMA challenge for resource', resourceUrl, 'AS:', as_uri);
+    Logger.debug('Received UMA challenge for resource', resourceUrl, 'AS:', challenge.as_uri);
 
-    // Get token endpoint
-    const tokenEndpoint = await this.getTokenEndpoint(as_uri);
-    if (!tokenEndpoint) {
-      Logger.debug('Token endpoint unavailable for AS', as_uri, 'returning original 401 response');
+    const tokenResult = await this.fetchUmaAccessToken(challenge);
+    if (!tokenResult) {
       return response;
     }
 
-    // Fetch access token with claim gathering
-    const { token, tokenType, expiresIn, error } = await this.fetchAccessToken(tokenEndpoint, ticket);
-    if (error || !token || !tokenType) {
-      Logger.debug('Failed to fetch access token', error?.message);
-      return response;
-    }
-
-    // Store token in cache
-    this.storeUmaToken(resourceUrl, method, {
-      token_type: tokenType,
-      access_token: token,
-      expires_in: expiresIn
-    });
-
-    // Retry with new token
-    const finalInit: RequestInit = init ? { ...init } : {};
-    finalInit.headers = {
-      ...(init?.headers as any),
-      Authorization: `${tokenType} ${token}`
-    };
+    const headers = new Headers(init?.headers);
+    headers.set('Authorization', `${tokenResult.token_type} ${tokenResult.access_token}`);
 
     Logger.debug('Retrying resource with new UMA token', resourceUrl);
-    return await this.throttledFetch(input, finalInit);
+    return await this.throttledFetch(input, {...init, headers});
   }
 
   async sse(input: string, abortController: AbortController): Promise<EventEmitter> {
@@ -510,24 +427,17 @@ export class Auth {
     if (response.status !== 401) {
       throw new Error(`Did not receive 401 when trying to connect to SSE. status: ${response.status}, body: ${await response.text()}`);
     }
-    const wwwAuthenticateHeader = response.headers.get("WWW-Authenticate");
-    if (!wwwAuthenticateHeader) {
-      throw new Error(`Missing WWW-Authenticate header in 401 response ${input}`);
+
+    const trustflowsClient = await loadTrustflowsClient();
+    const challenge = trustflowsClient.parseUmaAuthenticateHeader(response.headers);
+    if (!challenge?.as_uri || !challenge.ticket) {
+      throw new Error(`Missing UMA challenge in 401 response ${input}`);
     }
-    const {as_uri, ticket} = Object.fromEntries(wwwAuthenticateHeader.replace(/^UMA /, '').split(', ').map(
-      param => param.split('=') .map(s => s.replace(/"/g, ''))
-    ));
 
     const serviceEndpoint = response.headers.get("Link")?.match(/<([^>]+)>;\s*rel="service-token-endpoint"/)?.[1];
-
-    const tokenEndpoint = await this.getTokenEndpoint(as_uri);
-    if (!tokenEndpoint) {
-      throw new Error('cannot get UMA2 token endpoint');
-    }
-
-    const { token, tokenType, error } = await this.fetchAccessToken(tokenEndpoint, ticket);
-    if (error || !token || !tokenType) {
-      throw new Error('cannot get AS response: ' + (error?.message ?? 'Unknown error'));
+    const tokenResult = await this.fetchUmaAccessToken(challenge);
+    if (!tokenResult) {
+      throw new Error('cannot get AS response');
     }
 
     if (!serviceEndpoint) {
@@ -538,7 +448,7 @@ export class Auth {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        'Authorization': `${tokenType} ${token}`,
+        'Authorization': `${tokenResult.token_type} ${tokenResult.access_token}`,
       },
       body: JSON.stringify({
         resource_url: input,

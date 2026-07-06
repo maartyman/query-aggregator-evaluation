@@ -46,7 +46,7 @@ make kubernettes-start KIND_CLUSTER=my-cluster
 To install the UMA server, first clone the repository:
 ```bash
 git clone https://github.com/SolidLabResearch/user-managed-access
-cd user-managed-access/packages/uma
+cd user-managed-access-old/packages/uma
 ```
 Make sure you have Node.js and npm installed (>= 20.0.0), and run `corepack enable`.
 Then install dependencies:

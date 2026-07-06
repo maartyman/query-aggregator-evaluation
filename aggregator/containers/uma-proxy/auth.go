@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -67,45 +68,11 @@ func (sa *SolidAuth) Init(email, password string) error {
 	sa.email = email
 	sa.password = password
 
-	req, err := createRequestWithRedirect("GET", sa.webId, nil)
+	issuer, err := fetchOIDCIssuer(sa.webId)
 	if err != nil {
-		return fmt.Errorf("failed to create WebID request: %w", err)
+		return err
 	}
-
-	req.Header.Set("Accept", "application/n-triples")
-	resp, err := throttledDo(req)
-	if err != nil {
-		return fmt.Errorf("failed to fetch WebID profile: %w", err)
-	}
-	defer resp.Body.Close()
-
-	stream, errChan := rdfgo.Parse(resp.Body, rdfgo.ParserOptions{Format: "application/n-triples", BaseIRI: sa.webId})
-
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() {
-		for quad := range stream {
-			if quad.GetPredicate().GetValue() == "http://www.w3.org/ns/solid/terms#oidcIssuer" {
-				sa.cssBaseURL = quad.GetObject().GetValue()
-			}
-		}
-		defer wg.Done()
-	}()
-	err = nil
-	go func() {
-		err = <-errChan
-		if err != nil {
-			defer wg.Done()
-		}
-		defer wg.Done()
-	}()
-	wg.Wait()
-	if err != nil {
-		return fmt.Errorf("failed to parse WebID profile: %w", err)
-	}
-	if sa.cssBaseURL == "" {
-		return fmt.Errorf("OIDC issuer not found in WebID profile")
-	}
+	sa.cssBaseURL = issuer
 	logrus.Info("✅ OIDC issuer found: " + sa.cssBaseURL)
 
 	logrus.WithFields(logrus.Fields{"endpoint": sa.cssBaseURL + ".account/"}).Debug("🔑 Initializing client credentials for Solid OIDC")
@@ -117,6 +84,70 @@ func (sa *SolidAuth) Init(email, password string) error {
 	logrus.WithFields(logrus.Fields{"webid": sa.webId}).Info("✅ Client credentials initialized for WebID")
 
 	return sa.refreshAccessToken()
+}
+
+func fetchOIDCIssuer(webID string) (string, error) {
+	req, err := createRequestWithRedirect("GET", webID, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create WebID request: %w", err)
+	}
+
+	req.Header.Set("Accept", "text/turtle, application/n-triples;q=0.9")
+	resp, err := throttledDo(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch WebID profile: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("WebID profile request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read WebID profile: %w", err)
+	}
+
+	format := rdfFormatFromContentType(resp.Header.Get("Content-Type"))
+	if format == "" {
+		return "", fmt.Errorf("unsupported WebID profile content type: %q", resp.Header.Get("Content-Type"))
+	}
+
+	issuer, err := parseOIDCIssuer(body, format, webID)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse WebID profile as %s: %w", format, err)
+	}
+	if issuer == "" {
+		return "", fmt.Errorf("OIDC issuer not found in WebID profile")
+	}
+	return issuer, nil
+}
+
+func rdfFormatFromContentType(contentType string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch mediaType {
+	case "text/turtle", "application/x-turtle":
+		return "text/turtle"
+	case "application/n-triples", "application/n-quads":
+		return "application/n-triples"
+	default:
+		return ""
+	}
+}
+
+func parseOIDCIssuer(body []byte, format string, baseIRI string) (string, error) {
+	stream, errChan := rdfgo.Parse(bytes.NewReader(body), rdfgo.ParserOptions{Format: format, BaseIRI: baseIRI})
+	var issuer string
+	for quad := range stream {
+		if quad.GetPredicate().GetValue() == "http://www.w3.org/ns/solid/terms#oidcIssuer" {
+			issuer = quad.GetObject().GetValue()
+		}
+	}
+	if err := <-errChan; err != nil {
+		return "", err
+	}
+	return issuer, nil
 }
 
 // performAuthFlow performs the complete authentication flow and updates credentials and access token

@@ -1,4 +1,6 @@
-import { getLoggerFor, JwkGenerator } from '@solid/community-server';
+import { JwkGenerator } from '@solid/community-server';
+import { getLoggerFor } from 'global-logger-factory';
+import { ensureJwkKid } from '../util/Jwk';
 import { HttpHandler, HttpHandlerContext, HttpHandlerResponse } from '../util/http/models/HttpHandler';
 
 /**
@@ -17,7 +19,7 @@ export class JwksRequestHandler extends HttpHandler {
   async handle(context: HttpHandlerContext): Promise<HttpHandlerResponse> {
     this.logger.info(`Received JWKS request at '${context.request.url}'`);
 
-    const key = await this.generator.getPublicKey();
+    const key = await ensureJwkKid(await this.generator.getPublicKey());
 
     return {
       status: 200,
