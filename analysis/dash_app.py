@@ -292,6 +292,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianAuthorizationTokenRequests": ":.3f",
             "medianSetupHttpRequests": ":.3f",
             "medianOverallHttpRequests": ":.3f",
+            "medianServiceAlternatives": ":.3f",
         },
         labels={
             "iterationArgs": "Iteration argument",
@@ -303,6 +304,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianAuthorizationTokenRequests": "Measured median auth token requests",
             "medianSetupHttpRequests": "Setup median HTTP requests",
             "medianOverallHttpRequests": "Overall median HTTP requests",
+            "medianServiceAlternatives": "Median service alternatives",
         },
     )
     if axis_range is not None:
@@ -380,6 +382,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianSetupAuthorizationTokenRequests": ":.3f",
             "medianOverallAuthorizationTokenRequests": ":.3f",
             "medianDurationMs": ":.3f",
+            "medianServiceAlternatives": ":.3f",
         },
         labels={
             "iterationArgs": "Iteration argument",
@@ -389,6 +392,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianResourceRequests": "Measured median resource requests",
             "medianSetupAuthorizationTokenRequests": "Setup median auth token requests",
             "medianDurationMs": "Median duration (ms)",
+            "medianServiceAlternatives": "Median service alternatives",
             "variant": "Variant",
             "authorizationMode": "Authorization",
         },
@@ -420,6 +424,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianSetupResourceRequests": ":.3f",
             "medianOverallResourceRequests": ":.3f",
             "medianDurationMs": ":.3f",
+            "medianServiceAlternatives": ":.3f",
         },
         labels={
             "iterationArgs": "Iteration argument",
@@ -429,6 +434,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "medianSetupResourceRequests": "Setup median resource requests",
             "medianOverallResourceRequests": "Overall median resource requests",
             "medianDurationMs": "Median duration (ms)",
+            "medianServiceAlternatives": "Median service alternatives",
             "variant": "Variant",
             "authorizationMode": "Authorization",
         },

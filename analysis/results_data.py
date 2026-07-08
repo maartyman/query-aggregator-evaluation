@@ -45,6 +45,7 @@ SUMMARY_COLUMNS = [
     "overallResourceRequests",
     "overallAuthorizationTokenRequests",
     "overallNumberOfTriples",
+    "serviceAlternatives",
 ]
 
 AGGREGATE_COLUMNS = [
@@ -69,6 +70,8 @@ AGGREGATE_COLUMNS = [
     "medianOverallHttpRequests",
     "medianOverallResourceRequests",
     "medianOverallAuthorizationTokenRequests",
+    "medianServiceAlternatives",
+    "averageServiceAlternatives",
     "medianDief100ms",
     "averageDief100ms",
     "medianDief1s",
@@ -356,6 +359,7 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
                 "overallResourceRequests": int(number(parameters.get("overallResourceRequests", parameters.get("resourceRequests", 0)))),
                 "overallAuthorizationTokenRequests": int(number(parameters.get("overallAuthorizationTokenRequests", parameters.get("authorizationTokenRequests", 0)))),
                 "overallNumberOfTriples": int(number(parameters.get("overallNumberOfTriples", parameters.get("numberOfTriples", 0)))),
+                "serviceAlternatives": int(number(parameters.get("serviceAlternatives", 0))),
                 "warmupRuns": int(number(parameters.get("warmupRuns", 0))),
                 "recordedRuns": int(number(parameters.get("recordedRuns", 0))),
                 "phaseTimings": data.get("phaseTimings") or [],
@@ -503,6 +507,8 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "medianOverallAuthorizationTokenRequests": round(
                     median(row["overallAuthorizationTokenRequests"] for row in group), 3
                 ),
+                "medianServiceAlternatives": round(median(row["serviceAlternatives"] for row in group), 3),
+                "averageServiceAlternatives": round(mean(row["serviceAlternatives"] for row in group), 3),
                 "medianDief100ms": round(median(row["dief100ms"] for row in group), 3),
                 "averageDief100ms": round(mean(row["dief100ms"] for row in group), 3),
                 "medianDief1s": round(median(row["dief1s"] for row in group), 3),

@@ -8,6 +8,7 @@ type FetchClient = Auth | FetchLike;
 export interface TimedAggregatorResult {
   json: any;
   phaseTimings: PhaseTiming[];
+  metrics?: Record<string, any>;
 }
 
 function getFetch(client: FetchClient): FetchLike {
@@ -147,24 +148,31 @@ export async function getDiscoveredAggregatorServiceWithTimings(
     durationMs: bodyMs,
     cumulativeMs,
   });
-  return { json, phaseTimings };
+  return {
+    json,
+    phaseTimings,
+    metrics: {
+      serviceAlternatives: service.serviceAlternatives,
+    },
+  };
 }
 
 export async function discoverAggregatorService(
   client: FetchClient,
   sources: string[],
   queryString: string
-): Promise<{ descriptionUrl: string; outputUrl: string }> {
-  const candidateUrls = await discoverCandidateServiceDescriptions(client, sources, queryString);
-  if (candidateUrls.length === 1) {
+): Promise<{ descriptionUrl: string; outputUrl: string; serviceAlternatives: number }> {
+  const discovery = await discoverCandidateServiceDescriptions(client, sources, queryString);
+  if (discovery.candidateUrls.length === 1) {
     return {
-      descriptionUrl: candidateUrls[0],
-      outputUrl: serviceDescriptionToOutputUrl(candidateUrls[0])
+      descriptionUrl: discovery.candidateUrls[0],
+      outputUrl: serviceDescriptionToOutputUrl(discovery.candidateUrls[0]),
+      serviceAlternatives: discovery.serviceAlternatives,
     };
   }
 
   throw new Error(
-    `No discovered aggregator service matched query. candidates: ${candidateUrls.length}`
+    `No discovered aggregator service matched query. candidates: ${discovery.candidateUrls.length}`
   );
 }
 
@@ -172,7 +180,7 @@ async function discoverCandidateServiceDescriptions(
   client: FetchClient,
   sources: string[],
   queryString: string
-): Promise<string[]> {
+): Promise<{ candidateUrls: string[]; serviceAlternatives: number }> {
   const fetchService = getFetch(client);
   const sourceUrls = orderDiscoverySources(Array.from(new Set(sources.map(stripFragment))));
   const normalizedQuery = normalizeQuery(queryString);
@@ -206,12 +214,18 @@ async function discoverCandidateServiceDescriptions(
       const matched = await findMatchingDescription(candidates, descriptionFetches, normalizedQuery);
       if (matched) {
         abortUnusedDescriptionFetches(descriptionFetches, new Set([ matched ]));
-        return [ matched ];
+        return {
+          candidateUrls: [ matched ],
+          serviceAlternatives: candidates.size,
+        };
       }
     }
   }
 
-  return [];
+  return {
+    candidateUrls: [],
+    serviceAlternatives: candidates?.size ?? 0,
+  };
 }
 
 function startDescriptionFetches(

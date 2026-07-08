@@ -313,6 +313,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             const activityIri = `${activityUrl}#activity`;
             const activityDao = new ActivityDao();
             const phaseTimings: PhaseTiming[] = [];
+            const serviceAlternativeCounts: number[] = [];
 
             const activities = await activityDao.getById(activityIri, {
               aggregator: {
@@ -321,7 +322,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
                 enableCache: false,
                 discover,
                 expectedBindings: 1,
-                phaseTimings
+                phaseTimings,
+                serviceAlternativeCounts
               },
               auth
             });
@@ -351,7 +353,9 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
               aggregatorResultJson,
               {
                 setupHttpMetrics,
-                derivationClaimRequests: auth.getDerivationClaimRequestCount()
+                derivationClaimRequests: auth.getDerivationClaimRequestCount(),
+                serviceAlternatives: serviceAlternativeCounts.length > 0 ? Math.max(...serviceAlternativeCounts) : 0,
+                serviceAlternativeCounts,
               },
               phaseTimings
             );

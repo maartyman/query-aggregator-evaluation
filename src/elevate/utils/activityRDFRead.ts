@@ -30,6 +30,7 @@ export interface ActivityAggregatorOptions {
   discover?: boolean;
   expectedBindings?: number | null;
   phaseTimings?: PhaseTiming[];
+  serviceAlternativeCounts?: number[];
 }
 
 export class ActivityRDFRead {
@@ -282,6 +283,7 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
         ? await getDiscoveredAggregatorServiceWithTimings(options.auth, sources, query)
         : await this.queryViaAggregator(options.auth, query, sources, serviceKey, options.aggregator.expectedBindings);
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       // Return count directly if count query
@@ -732,6 +734,7 @@ ORDER BY ?lapIndex
         null
       );
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -854,6 +857,7 @@ SELECT ?index WHERE {
         null
       );
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -911,6 +915,7 @@ ORDER BY ?peakDuration
         null
       );
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -979,6 +984,7 @@ SELECT * WHERE {
         null
       );
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -1104,6 +1110,7 @@ ORDER BY ?zoneIndex
         null
       );
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
+      this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
 
       const bindings = aggregatorResults.results?.bindings || [];
@@ -1237,8 +1244,18 @@ _:Query
     sources: string[],
     serviceKey: string,
     expectedBindings: number | null = 0
-  ): Promise<{ json: any; phaseTimings: PhaseTiming[] }> {
+  ): Promise<{ json: any; phaseTimings: PhaseTiming[]; metrics?: Record<string, any> }> {
     const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey, expectedBindings);
     return await getAggregatorServiceWithTimings(auth, serviceId);
+  }
+
+  private recordServiceAlternatives(
+    aggregator: ActivityAggregatorOptions,
+    metrics?: Record<string, any>
+  ): void {
+    if (typeof metrics?.serviceAlternatives !== "number") {
+      return;
+    }
+    aggregator.serviceAlternativeCounts?.push(metrics.serviceAlternatives);
   }
 }

@@ -435,6 +435,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
             const activityDao = new ActivityDao();
             const phaseTimings: PhaseTiming[] = [];
+            const serviceAlternativeCounts: number[] = [];
             await activityDao.count({
               sources: activitySources,
               aggregator: {
@@ -443,7 +444,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
                 enableCache: false,
                 discover,
                 expectedBindings: 1,
-                phaseTimings
+                phaseTimings,
+                serviceAlternativeCounts
               },
               auth
             });
@@ -459,7 +461,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
                 enableCache: false,
                 discover,
                 expectedBindings: numberOfActivities,
-                phaseTimings
+                phaseTimings,
+                serviceAlternativeCounts
               },
               auth
             });
@@ -487,7 +490,11 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
               this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
               aggregatorResultJson,
-              { setupHttpMetrics },
+              {
+                setupHttpMetrics,
+                serviceAlternatives: serviceAlternativeCounts.length > 0 ? Math.max(...serviceAlternativeCounts) : 0,
+                serviceAlternativeCounts,
+              },
               phaseTimings
             );
             results.push(aggregatorResult);

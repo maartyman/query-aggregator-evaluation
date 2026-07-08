@@ -275,7 +275,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
               podContext.name + (discover ? "_aggregator_discovered" : "_aggregator"),
               startTime,
               timedAggregatorResult.json,
-              { setupHttpMetrics },
+              { setupHttpMetrics, ...(timedAggregatorResult.metrics ?? {}) },
               timedAggregatorResult.phaseTimings
             );
             results.push(aggregatorResult);
