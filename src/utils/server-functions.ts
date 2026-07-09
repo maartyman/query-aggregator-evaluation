@@ -8,6 +8,25 @@ export type AuthorizationMode = "no-auth" | "nondelegated" | "delegated";
 
 let trackedServers: ServerInstanceContext[] = [];
 const trackedProcesses = new Map<number, { child: ChildProcess; label: string }>();
+const PORT_SHUTDOWN_TIMEOUT_MS = 10_000;
+const PROCESS_SHUTDOWN_GRACE_MS = 2_000;
+const SERVER_READY_LOG_TIMEOUT_MS = 120_000;
+const UMA_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_UMA_READY";
+const CSS_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_CSS_READY";
+const CSS_PAT_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_CSS_PAT_READY";
+const AGGREGATOR_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_AGGREGATOR_READY";
+
+interface ManagedProcess {
+  child: ChildProcess;
+  waitForLog(marker: string, timeoutMs?: number): Promise<void>;
+}
+
+interface LogWaiter {
+  marker: string;
+  timeout: NodeJS.Timeout;
+  resolve(): void;
+  reject(error: Error): void;
+}
 
 function execCommand(command: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
@@ -21,24 +40,67 @@ function execCommand(command: string): Promise<{ stdout: string; stderr: string 
   });
 }
 
-async function killProcessOnPort(port: number): Promise<void> {
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function listProcessIdsOnPort(port: number): Promise<number[]> {
   const { stdout, stderr } = await execCommand(`lsof -ti:${port}`);
   if (stderr) {
-    return;
+    return [];
   }
-  const pids = stdout.trim().split('\n')
+  return stdout.trim().split('\n')
     .filter(pid => pid)
-    .filter(pid => pid !== String(process.pid) && pid !== String(process.ppid));
+    .map(pid => Number(pid))
+    .filter(pid => Number.isInteger(pid) && pid > 0)
+    .filter(pid => pid !== process.pid && pid !== process.ppid);
+}
+
+async function waitForPortToBeFree(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pids = await listProcessIdsOnPort(port);
+    if (pids.length === 0) {
+      return true;
+    }
+    await sleep(200);
+  }
+  return (await listProcessIdsOnPort(port)).length === 0;
+}
+
+async function killProcessOnPort(port: number): Promise<void> {
+  const pids = await listProcessIdsOnPort(port);
   if (pids.length === 0) {
     return;
   }
-  const killResult = await execCommand(`kill ${pids.join(' ')}`);
-  if (killResult.stderr) {
-    console.error(`Stderr while killing processes on port ${port}: ${killResult.stderr}`);
+
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Ignore processes that have already exited.
+    }
+  }
+
+  if (await waitForPortToBeFree(port, PORT_SHUTDOWN_TIMEOUT_MS)) {
+    return;
+  }
+
+  const remainingPids = await listProcessIdsOnPort(port);
+  for (const pid of remainingPids) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Ignore processes that have already exited.
+    }
+  }
+
+  if (!await waitForPortToBeFree(port, PORT_SHUTDOWN_TIMEOUT_MS)) {
+    console.error(`Port ${port} is still in use after killing process(es): ${remainingPids.join(", ")}`);
   }
 }
 
-function runCommand(command: string, label: string, debug: boolean): ChildProcess {
+function runCommand(command: string, label: string, debug: boolean): ManagedProcess {
   const child = spawn(command, {
     shell: true,
     stdio: 'pipe',
@@ -48,8 +110,25 @@ function runCommand(command: string, label: string, debug: boolean): ChildProces
       GOCACHE: process.env.GOCACHE ?? "/tmp/query-aggregator-evaluation-go-build",
     },
   });
+  const waiters: LogWaiter[] = [];
+  let stdoutBuffer = "";
   let stderrBuffer = "";
+
+  const resolveMatchingWaiters = () => {
+    for (let i = waiters.length - 1; i >= 0; i--) {
+      const waiter = waiters[i];
+      if (stdoutBuffer.includes(waiter.marker)) {
+        clearTimeout(waiter.timeout);
+        waiters.splice(i, 1);
+        waiter.resolve();
+      }
+    }
+  };
+
   child.stdout?.on('data', (data: unknown) => {
+    const text = String(data);
+    stdoutBuffer = (stdoutBuffer + text).slice(-16_000);
+    resolveMatchingWaiters();
     if (debug) {
       process.stdout.write(`[${label}] ${data as string}`);
     }
@@ -71,11 +150,44 @@ function runCommand(command: string, label: string, debug: boolean): ChildProces
     if (child.pid) {
       trackedProcesses.delete(child.pid);
     }
+    for (const waiter of waiters.splice(0)) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error(
+        `${label} exited before logging "${waiter.marker}"` +
+        ` (code ${code}${signal ? `, signal ${signal}` : ""}).`
+      ));
+    }
     if (code && stderrBuffer.trim()) {
       console.error(`[${label}] stderr before exit:\n${stderrBuffer.trim()}`);
     }
   });
-  return child;
+  return {
+    child,
+    waitForLog(marker: string, timeoutMs = SERVER_READY_LOG_TIMEOUT_MS): Promise<void> {
+      if (stdoutBuffer.includes(marker)) {
+        return Promise.resolve();
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return Promise.reject(new Error(`${label} exited before logging "${marker}".`));
+      }
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          const index = waiters.findIndex(waiter => waiter.marker === marker);
+          if (index >= 0) {
+            waiters.splice(index, 1);
+          }
+          reject(new Error(`Timed out while waiting for ${label} to log "${marker}".`));
+        }, timeoutMs);
+        waiters.push({ marker, timeout, resolve, reject });
+      });
+    },
+  };
+}
+
+async function waitForProcessLogs(label: string, waits: Array<{ process: ManagedProcess; marker: string }>): Promise<void> {
+  console.log(`Waiting for ${label} readiness logs (${waits.length} process(es))...`);
+  await Promise.all(waits.map(wait => wait.process.waitForLog(wait.marker)));
+  console.log(`✓ ${label} readiness logs received (${waits.length}/${waits.length} process(es)).`);
 }
 
 async function stopTrackedProcesses(): Promise<void> {
@@ -97,77 +209,31 @@ async function stopTrackedProcesses(): Promise<void> {
     }
   }
 
-  await new Promise(resolve => setTimeout(resolve, 1000));
-}
-
-async function listSeededAccountsMissingPat(serverDataPath: string): Promise<string[]> {
-  const accountsDataDir = path.join(serverDataPath, ".internal", "accounts", "data");
-  let files: string[];
-  try {
-    files = await fs.readdir(accountsDataDir);
-  } catch {
-    return [serverDataPath];
-  }
-
-  const accountFiles = files.filter(file => file.endsWith("$.json"));
-  if (accountFiles.length === 0) {
-    return [serverDataPath];
-  }
-
-  const missing: string[] = [];
-  for (const file of accountFiles) {
-    let account: { authzServer?: string; asToken?: unknown };
-    try {
-      const content = await fs.readFile(path.join(accountsDataDir, file), "utf8");
-      account = JSON.parse(content).payload as { authzServer?: string; asToken?: unknown };
-    } catch {
-      missing.push(file);
-      continue;
-    }
-    if (account.authzServer && !account.asToken) {
-      missing.push(file);
-    }
-  }
-  return missing;
-}
-
-async function waitForCssAuthBootstrap(dataLocation: string, servers: ServerInstanceContext[]): Promise<void> {
-  const accountCounts = await Promise.all(servers.map(async server => {
-    try {
-      const files = await fs.readdir(path.join(dataLocation, server.relativePath, ".internal", "accounts", "data"));
-      return files.filter(file => file.endsWith("$.json")).length;
-    } catch {
-      return 0;
-    }
-  }));
-  const accountCount = accountCounts.reduce((sum, count) => sum + count, 0);
-  const timeoutMs = Math.max(120_000, accountCount * 5_000);
-  const deadline = Date.now() + timeoutMs;
-  let missingByServer: Array<{ server: ServerInstanceContext; missing: string[] }> = [];
-
+  const deadline = Date.now() + PROCESS_SHUTDOWN_GRACE_MS;
   while (Date.now() < deadline) {
-    missingByServer = (await Promise.all(servers.map(async server => ({
-      server,
-      missing: await listSeededAccountsMissingPat(path.join(dataLocation, server.relativePath))
-    })))).filter(result => result.missing.length > 0);
-
-    if (missingByServer.length === 0) {
+    const runningProcesses = processes.filter(([, { child }]) => child.exitCode === null && child.signalCode === null);
+    if (runningProcesses.length === 0) {
       return;
     }
-
-    const missingCount = missingByServer.reduce((sum, result) => sum + result.missing.length, 0);
-    console.log(`Waiting for CSS auth bootstrap to complete (${missingCount}/${accountCount} account(s) missing PAT)...`);
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await sleep(100);
   }
 
-  const sample = missingByServer
-    .flatMap(result => result.missing.slice(0, 3).map(file => `${result.server.relativePath}/${file}`))
-    .slice(0, 10)
-    .join(", ");
-  throw new Error(
-    `Timed out while waiting ${timeoutMs}ms for CSS auth bootstrap to complete` +
-    (sample ? `. Missing PAT sample: ${sample}` : "")
-  );
+  for (const [pid, { child }] of processes) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      continue;
+    }
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Ignore already exited processes.
+      }
+    }
+  }
+
+  await sleep(500);
 }
 
 async function pathExists(location: string): Promise<boolean> {
@@ -216,8 +282,9 @@ export async function startServers(
     killProcessOnPort(server.umaPort),
     killProcessOnPort(server.solidPort)
   ]));
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await sleep(1000);
 
+  const umaWaits: Array<{ process: ManagedProcess; marker: string }> = [];
   for (const server of servers) {
     const umaLogLevel = loggingOptions?.uma ?? 'error';
     const umaConfigLocation = authorizationMode === "no-auth"
@@ -237,11 +304,14 @@ export async function startServers(
       ? `${umaLocation}/bin/main-precompiled.js --mode ${authorizationMode}`
       : `${umaLocation}/bin/main.js`;
     const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
-    runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
+    const process = runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
+    umaWaits.push({
+      process,
+      marker: `${UMA_READY_LOG_PREFIX} port=${server.umaPort} baseUrl=${server.umaBaseUrl}`,
+    });
   }
 
-  console.log("waiting 1 seconds before starting CSS servers...");
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await waitForProcessLogs("UMA server", umaWaits);
 
   const cssConfigLocation = authorizationMode === "no-auth"
     ? "./config/no-auth.json"
@@ -250,6 +320,8 @@ export async function startServers(
     ? ""
     : " ./config/init-pat.json";
 
+  const cssWaits: Array<{ process: ManagedProcess; marker: string }> = [];
+  const cssPatWaits: Array<{ process: ManagedProcess; marker: string }> = [];
   for (const server of servers) {
     const serverDataPath = path.join(dataLocation, server.relativePath);
     const cssLogLevel = loggingOptions?.css ?? 'error';
@@ -264,73 +336,31 @@ export async function startServers(
       ? `node ./bin/community-solid-server-precompiled.js`
       : `yarn run community-solid-server`;
     const command = `cd "${cssLocation}" && ${cssCommand} -m . -c ${cssConfigLocation}${cssPatConfigLocation} --baseUrl ${server.solidBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
-    runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
+    const process = runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
+    cssWaits.push({
+      process,
+      marker: `${CSS_READY_LOG_PREFIX} port=${server.solidPort} baseUrl=${server.solidBaseUrl}`,
+    });
+    if (authorizationMode !== "no-auth") {
+      cssPatWaits.push({
+        process,
+        marker: `${CSS_PAT_READY_LOG_PREFIX} rootFilePath=${serverDataPath}`,
+      });
+    }
   }
 
-  console.log("waiting 1 seconds before starting aggregator...");
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await waitForProcessLogs("CSS server", cssWaits);
+  if (cssPatWaits.length > 0) {
+    await waitForProcessLogs("CSS PAT bootstrap", cssPatWaits);
+  }
 
   const queryUserWebId = `${queryUser.baseUrl}/profile/card#me`;
-  const cssReadyDeadline = Date.now() + 120_000;
-  while (Date.now() < cssReadyDeadline) {
-    let allServersUp = true;
-    for (const server of servers) {
-      try {
-        const response = await fetch(`${server.solidBaseUrl}/.well-known/solid`);
-        if (!response.ok) {
-          allServersUp = false;
-          break;
-        }
-      } catch (e) {
-        allServersUp = false;
-        break;
-      }
-    }
-    if (allServersUp) {
-      break;
-    }
-    console.log("Waiting for CSS servers to be up...");
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  if (Date.now() >= cssReadyDeadline) {
-    throw new Error("Timed out while waiting for CSS servers to be up");
-  }
-
-  if (authorizationMode !== "no-auth") {
-    await waitForCssAuthBootstrap(dataLocation, servers);
-  }
-
   console.log("Starting aggregator...");
   const aggregatorLogLevel = loggingOptions?.aggregator ?? 'error';
   const aggregatorCommand = `cd "${aggregatorLocation}" && go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${aggregatorLogLevel}`;
   const aggregatorProcess = runCommand(aggregatorCommand, "AGGREGATOR", loggingOptions?.aggregator !== undefined);
-  let aggregatorExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  aggregatorProcess.once('exit', (code, signal) => {
-    aggregatorExit = { code, signal };
-  });
-
-  console.log("Waiting for aggregator to be up...");
-  const aggregatorReadyDeadline = Date.now() + 120_000;
-  while (Date.now() < aggregatorReadyDeadline) {
-    if (aggregatorExit) {
-      throw new Error(
-        `Aggregator exited during startup with code ${aggregatorExit.code}` +
-        `${aggregatorExit.signal ? ` (signal ${aggregatorExit.signal})` : ''}. ` +
-        `Command was: ${aggregatorCommand}`
-      );
-    }
-
-    try {
-      const response = await fetch("http://localhost:5000/config", { method: "HEAD" });
-      if (response.status < 500) {
-        return;
-      }
-    } catch {
-      // Keep polling until the listener is bound.
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-
-  throw new Error(`Timed out while waiting for aggregator to be up. Command was: ${aggregatorCommand}`);
+  await waitForProcessLogs("aggregator", [{
+    process: aggregatorProcess,
+    marker: `${AGGREGATOR_READY_LOG_PREFIX} port=5000 baseUrl=http://localhost:5000`,
+  }]);
 }

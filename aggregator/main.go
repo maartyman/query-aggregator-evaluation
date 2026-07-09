@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -105,20 +106,27 @@ func main() {
 
 	serverMux := http.NewServeMux()
 	RegisterServerMetadataEndpoints(serverMux)
-
-	go func() {
-		logrus.WithFields(logrus.Fields{"port": ServerPort}).Info("Server listening")
-		if err := http.ListenAndServe(":"+ServerPort, serverMux); err != nil {
-			logrus.WithFields(logrus.Fields{"err": err}).Error("HTTP server failed")
-			os.Exit(1)
-		}
-	}()
 	auth.InitSigning(serverMux)
 	auth.InitProtectionAPI(*webId)
 	InitializeKubernetes(serverMux)
 	startConfigurationEndpoint(serverMux)
 	SetupResourceRegistration()
 	InitAuthProxy(serverMux, fmt.Sprintf("%s://%s:%s", Protocol, Host, ServerPort))
+
+	listener, err := net.Listen("tcp", ":"+ServerPort)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"err": err}).Error("HTTP server failed to bind")
+		os.Exit(1)
+	}
+	fmt.Printf("QUERY_AGGREGATOR_EVALUATION_AGGREGATOR_READY port=%s baseUrl=%s://%s:%s\n", ServerPort, Protocol, Host, ServerPort)
+
+	go func() {
+		logrus.WithFields(logrus.Fields{"port": ServerPort}).Info("Server listening")
+		if err := http.Serve(listener, serverMux); err != nil {
+			logrus.WithFields(logrus.Fields{"err": err}).Error("HTTP server failed")
+			os.Exit(1)
+		}
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)

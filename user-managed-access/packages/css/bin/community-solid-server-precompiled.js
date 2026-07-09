@@ -60,6 +60,7 @@ async function main() {
   const createApp = selectApp(process.argv);
   const app = createApp(variables);
   await app.start();
+  console.log(`QUERY_AGGREGATOR_EVALUATION_CSS_READY port=${variables['urn:solid-server:default:variable:port']} baseUrl=${variables['urn:solid-server:default:variable:baseUrl']}`);
 }
 
 main().catch((error) => {

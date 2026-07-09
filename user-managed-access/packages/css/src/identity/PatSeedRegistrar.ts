@@ -61,6 +61,7 @@ export class PatSeedRegistrar extends StaticHandler implements StatusDependant<b
       tasks.push(this.initializeAccount(accountId, webId, seededIssuer));
     }
     await Promise.all(tasks);
+    console.log(`QUERY_AGGREGATOR_EVALUATION_CSS_PAT_READY rootFilePath=${this.rootFilePath ?? ''} accounts=${accountMap.size}`);
   }
 
   protected async initializeAccount(accountId: string, webId: string, seededIssuer?: string): Promise<void> {

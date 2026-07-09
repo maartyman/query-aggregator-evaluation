@@ -76,6 +76,7 @@ async function main() {
 
   const umaServer = createApp(variables);
   await umaServer.start();
+  console.log(`QUERY_AGGREGATOR_EVALUATION_UMA_READY port=${argv.port} baseUrl=${argv.baseUrl}`);
 }
 
 main().catch((error) => {

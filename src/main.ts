@@ -218,21 +218,21 @@ async function runExperiment(
     setup = experiment.generate();
   }
 
-  await startServers(
-    path.resolve("./user-managed-access/packages/uma"),
-    path.resolve("./user-managed-access/packages/css"),
-    path.resolve("./aggregator"),
-    experimentLocation,
-    authorizationMode,
-    setup.servers,
-    setup.queryUser,
-    loggingOptions,
-    resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(",")
-  );
-
-  getAggregatorIdStore().clear();
-
   try {
+    await startServers(
+      path.resolve("./user-managed-access/packages/uma"),
+      path.resolve("./user-managed-access/packages/css"),
+      path.resolve("./aggregator"),
+      experimentLocation,
+      authorizationMode,
+      setup.servers,
+      setup.queryUser,
+      loggingOptions,
+      resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(",")
+    );
+
+    getAggregatorIdStore().clear();
+
     if (WARMUP_RUNS > 0) {
       console.log(`Running ${WARMUP_RUNS} warmup run(s) for local conditions...`);
       await experiment.runLocal(WARMUP_RUNS);
@@ -258,7 +258,7 @@ async function runExperiment(
 
     return [...resultsLocal, ...resultsAggregator, ...resultsAggregatorDiscovered];
   } finally {
-    await stopServers();
+    await stopServers(setup.servers);
   }
 }
 
@@ -297,6 +297,7 @@ async function runExperimentWithRetries(
 
       const message = error instanceof Error ? error.message : String(error);
       console.error(`✗ Attempt ${attempt}/${EXPERIMENT_ATTEMPTS} failed for ${fullExperimentName}: ${message}`);
+      await stopServers();
       console.log(`Restarting servers and retrying ${fullExperimentName}...\n`);
     }
   }

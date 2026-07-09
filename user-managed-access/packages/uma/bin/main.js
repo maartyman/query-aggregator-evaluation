@@ -61,6 +61,7 @@ const launch = async () => {
 
   const umaServer = await manager.instantiate('urn:uma:default:App',{variables});
   await umaServer.start();
+  console.log(`QUERY_AGGREGATOR_EVALUATION_UMA_READY port=${argv.port} baseUrl=${argv.baseUrl}`);
 };
 
 launch();
