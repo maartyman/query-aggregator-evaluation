@@ -53,6 +53,19 @@ def y_axis_range(min_value, max_value):
     return [min_value, max_value]
 
 
+DEFAULT_FACET_ROW_HEIGHT_PX = 450
+
+
+def facet_row_count(dataframe, column):
+    if dataframe.empty or column not in dataframe:
+        return 1
+    return max(1, int(dataframe[column].nunique()))
+
+
+def keep_facet_row_height(figure, row_count, row_height=DEFAULT_FACET_ROW_HEIGHT_PX):
+    figure.update_layout(height=row_height * row_count)
+
+
 app = Dash(__name__)
 server = app.server
 
@@ -309,6 +322,8 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     )
     if axis_range is not None:
         duration_figure.update_yaxes(range=axis_range)
+    experiment_facet_rows = facet_row_count(filtered_aggregates, "experimentName")
+    keep_facet_row_height(duration_figure, experiment_facet_rows)
     phase_order = []
     if not filtered_phases.empty:
         phase_order = [
@@ -355,6 +370,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     phase_figure.update_layout(barmode="stack")
     if axis_range is not None:
         phase_figure.update_yaxes(range=axis_range)
+    keep_facet_row_height(phase_figure, facet_row_count(filtered_phases, "phaseFacet"))
     auth_request_scaling_figure = px.line(
         filtered_aggregates,
         x="iterationArgs",
@@ -397,6 +413,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "authorizationMode": "Authorization",
         },
     )
+    keep_facet_row_height(auth_request_scaling_figure, experiment_facet_rows)
     resource_request_scaling_figure = px.line(
         filtered_aggregates,
         x="iterationArgs",
@@ -439,6 +456,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
             "authorizationMode": "Authorization",
         },
     )
+    keep_facet_row_height(resource_request_scaling_figure, experiment_facet_rows)
     diefficiency_labels = {
         "medianDief100ms": "Median dief@100ms",
         "medianDief1s": "Median dief@1s",
@@ -524,6 +542,7 @@ def update_views(experiments, authorization_modes, execution_types, y_min, y_max
     if axis_range is not None:
         diefficiency_figure.update_yaxes(range=axis_range)
         diefficiency_duration_figure.update_yaxes(range=axis_range)
+    keep_facet_row_height(diefficiency_figure, experiment_facet_rows)
     columns = [
         {"name": column, "id": column}
         for column in filtered_aggregates.columns
