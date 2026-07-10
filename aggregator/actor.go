@@ -52,6 +52,22 @@ func createActor(pipelineDescription string) (Actor, error) {
 					Name:            "transformation",
 					Image:           "incremunica",
 					ImagePullPolicy: v1.PullNever,
+					Command:         []string{"/bin/sh", "-c"},
+					Args: []string{
+						`set -u
+mkdir -p /incremunica-logs
+LOG_FILE="/incremunica-logs/incremunica-${HOSTNAME:-actor}-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+echo "Writing Incremunica output to ${LOG_FILE}"
+npm run start >"${LOG_FILE}" 2>&1 &
+app_pid=$!
+tail -n +1 -f "${LOG_FILE}" &
+tail_pid=$!
+wait "${app_pid}"
+status=$?
+kill "${tail_pid}" 2>/dev/null || true
+wait "${tail_pid}" 2>/dev/null || true
+exit "${status}"`,
+					},
 					Env: []v1.EnvVar{
 						{Name: "PIPELINE_DESCRIPTION", Value: fmt.Sprintf("%v", pipelineDescription)},
 						{Name: "HTTP_PROXY", Value: "http://uma-proxy-service.default.svc.cluster.local:8080"},
@@ -68,6 +84,10 @@ func createActor(pipelineDescription string) (Actor, error) {
 							MountPath: "/key-pair",
 							ReadOnly:  true,
 						},
+						{
+							Name:      "incremunica-logs",
+							MountPath: "/incremunica-logs",
+						},
 					},
 				},
 			},
@@ -77,6 +97,15 @@ func createActor(pipelineDescription string) (Actor, error) {
 					VolumeSource: v1.VolumeSource{
 						Secret: &v1.SecretVolumeSource{
 							SecretName: "uma-proxy-key-pair",
+						},
+					},
+				},
+				{
+					Name: "incremunica-logs",
+					VolumeSource: v1.VolumeSource{
+						HostPath: &v1.HostPathVolumeSource{
+							Path: "/tmp/query-aggregator-evaluation/incremunica-logs",
+							Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
 						},
 					},
 				},
@@ -199,6 +228,10 @@ podReady:
 	}
 
 	return actor, nil
+}
+
+func hostPathTypePtr(hostPathType v1.HostPathType) *v1.HostPathType {
+	return &hostPathType
 }
 
 func isPodReady(pod *v1.Pod) bool {
