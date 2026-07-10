@@ -16,6 +16,7 @@ const CSS = {
   create: 'urn:example:css:modes:create',
   delete: 'urn:example:css:modes:delete',
   write: 'urn:example:css:modes:write',
+  continuousRead: 'urn:knows:uma:scopes:continuous:read',
 };
 
 describe('OdrlAuthorizer', (): void => {
@@ -90,6 +91,20 @@ describe('OdrlAuthorizer', (): void => {
       { resource_id: 'rid', resource_scopes: [ CSS.read, CSS.write ] },
     ])).resolves.toEqual([{ resource_id: 'rid', resource_scopes: [ CSS.read ] }]);
     expect(policies.getStore).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats continuous read as an ODRL read action while preserving the requested scope.', async(): Promise<void> => {
+    addPermission({
+      policy: 'urn:policy',
+      permission: 'urn:permission',
+      actions: [ ODRL.read ],
+      targets: [ 'rid/events' ],
+      assignees: [ webId ],
+    });
+
+    await expect(authorizer.permissions({ [WEBID]: webId }, [
+      { resource_id: 'rid/events', resource_scopes: [ CSS.continuousRead ] },
+    ])).resolves.toEqual([{ resource_id: 'rid/events', resource_scopes: [ CSS.continuousRead ] }]);
   });
 
   it('matches urn:uuid resource identifiers as policy targets.', async(): Promise<void> => {

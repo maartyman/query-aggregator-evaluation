@@ -32,6 +32,7 @@ vi.mock('node:crypto', () => ({
 
 const CSS_READ = 'urn:example:css:modes:read';
 const CSS_WRITE = 'urn:example:css:modes:write';
+const CONTINUOUS_READ = 'urn:knows:uma:scopes:continuous:read';
 
 describe('ResourceRegistration', (): void => {
   const owner = 'owner';
@@ -137,6 +138,21 @@ describe('ResourceRegistration', (): void => {
         ...createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ CSS_READ, CSS_WRITE ])
           .getQuads(null, null, null, null),
       ]);
+    });
+
+    it('stores continuous read registered-resource policies as ODRL read permissions.', async(): Promise<void> => {
+      const policy = createRegisteredResourceAccessPolicy('name', owner, 'query-user', [ CONTINUOUS_READ ]);
+      const permission = DF.namedNode(
+        getRegisteredResourceAccessPermissionId('name', 'query-user', ODRL.terms.read.value)
+      );
+
+      expect(policy.countQuads(
+        DF.namedNode(getRegisteredResourceAccessPolicyId('name', 'query-user')),
+        ODRL.terms.permission,
+        permission,
+        null,
+      )).toBe(1);
+      expect(policy.countQuads(permission, ODRL.terms.action, ODRL.terms.read, null)).toBe(1);
     });
 
     it('creates registered-resource policies for all configured authorized WebIDs.', async(): Promise<void> => {

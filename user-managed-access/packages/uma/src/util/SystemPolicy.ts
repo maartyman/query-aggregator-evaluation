@@ -49,6 +49,7 @@ const CSS_SCOPE_TO_ODRL_ACTION: Record<string, string> = {
   'urn:example:css:modes:create': ODRL.create,
   'urn:example:css:modes:delete': ODRL.delete,
   'urn:example:css:modes:write': ODRL.write,
+  'urn:knows:uma:scopes:continuous:read': ODRL.read,
 };
 
 const toOdrlAction = (action: string): string => CSS_SCOPE_TO_ODRL_ACTION[action] ?? action;

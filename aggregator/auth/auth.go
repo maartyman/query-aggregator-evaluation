@@ -78,6 +78,34 @@ func AuthorizeRequest(response http.ResponseWriter, request *http.Request, extra
 	return requestUMATicket(response, request, extraPermissions)
 }
 
+func AuthorizePermissions(response http.ResponseWriter, request *http.Request, requiredPermissions []Permission) bool {
+	if len(requiredPermissions) == 0 {
+		http.Error(response, "No permissions requested", http.StatusBadRequest)
+		return false
+	}
+
+	if request.Header.Get("Authorization") == "" {
+		logrus.WithFields(logrus.Fields{"method": request.Method, "path": request.URL.Path}).Warn("🔐 Authorization header missing")
+		return requestUMATicketForPermissions(response, request, requiredPermissions)
+	}
+
+	logrus.WithFields(logrus.Fields{"method": request.Method, "path": request.URL.Path}).Info("🔍 Verifying authorization token")
+	permissions, err := verifyTicketForToken(request.Header.Get("Authorization"), []string{AS_ISSUER})
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"err": err}).Error("❌ Error while verifying ticket")
+		return requestUMATicketForPermissions(response, request, requiredPermissions)
+	}
+
+	for _, required := range requiredPermissions {
+		if !hasPermission(permissions, required) {
+			logrus.WithFields(logrus.Fields{"resource_id": required.ResourceID, "scopes": required.ResourceScopes}).Warn("❌ Authorization failed - missing required permission")
+			return requestUMATicketForPermissions(response, request, requiredPermissions)
+		}
+	}
+
+	return true
+}
+
 func requestUMATicket(response http.ResponseWriter, request *http.Request, extraPermissions []Permission) bool {
 	completeURL := requestURL(request)
 	logrus.WithFields(logrus.Fields{"url": completeURL}).Info("🎫 Creating UMA ticket")
@@ -93,6 +121,22 @@ func requestUMATicket(response http.ResponseWriter, request *http.Request, extra
 		}
 	}
 	ticket, err := fetchTicketForIssuer(ticketPermissions, AS_ISSUER)
+	return writeUMATicketResponse(response, completeURL, ticket, err)
+}
+
+func requestUMATicketForPermissions(response http.ResponseWriter, request *http.Request, requiredPermissions []Permission) bool {
+	completeURL := requestURL(request)
+	logrus.WithFields(logrus.Fields{"url": completeURL, "permissions": requiredPermissions}).Info("🎫 Creating UMA ticket for explicit permissions")
+
+	ticketPermissions := make(map[string][]string)
+	for _, permission := range requiredPermissions {
+		ticketPermissions[permission.ResourceID] = permission.ResourceScopes
+	}
+	ticket, err := fetchTicketForIssuer(ticketPermissions, AS_ISSUER)
+	return writeUMATicketResponse(response, completeURL, ticket, err)
+}
+
+func writeUMATicketResponse(response http.ResponseWriter, completeURL string, ticket string, err error) bool {
 	if err != nil {
 		logrus.WithFields(logrus.Fields{"err": err}).Error("❌ Error while retrieving ticket")
 		http.Error(response, "error while retrieving ticket: "+err.Error(), http.StatusInternalServerError)
@@ -108,6 +152,21 @@ func requestUMATicket(response http.ResponseWriter, request *http.Request, extra
 		fmt.Sprintf(`UMA as_uri="%s", ticket="%s"`, AS_ISSUER, ticket),
 	)
 	response.WriteHeader(http.StatusUnauthorized)
+	return false
+}
+
+func hasPermission(permissions []Permission, required Permission) bool {
+	for _, permission := range permissions {
+		if permission.ResourceID != required.ResourceID {
+			continue
+		}
+		for _, scope := range required.ResourceScopes {
+			if !hasScope(permission.ResourceScopes, ResourceScope(scope)) {
+				return false
+			}
+		}
+		return true
+	}
 	return false
 }
 
@@ -716,9 +775,9 @@ const (
 	ScopeCreate             ResourceScope = "urn:example:css:modes:create"
 	ScopeDelete             ResourceScope = "urn:example:css:modes:delete"
 	ScopeWrite              ResourceScope = "urn:example:css:modes:write"
-	ScopeContinuousRead     ResourceScope = "urn:example:css:modes:continuous:read"
-	ScopeContinuousWrite    ResourceScope = "urn:example:css:modes:continuous:write"
-	ScopeContinuousDuplex   ResourceScope = "urn:example:css:modes:continuous:duplex"
+	ScopeContinuousRead     ResourceScope = "urn:knows:uma:scopes:continuous:read"
+	ScopeContinuousWrite    ResourceScope = "urn:knows:uma:scopes:continuous:write"
+	ScopeContinuousDuplex   ResourceScope = "urn:knows:uma:scopes:continuous:duplex"
 	ScopeDerivationCreation ResourceScope = "urn:knows:uma:scopes:derivation-creation"
 	ScopeDerivationRead     ResourceScope = "urn:knows:uma:scopes:derivation-read"
 )

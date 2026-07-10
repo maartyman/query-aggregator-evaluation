@@ -77,17 +77,8 @@ func InitAuthProxy(mux *http.ServeMux, baseURL string) {
 }
 
 func RegisterAuthProxyResources() {
-	if AuthProxyInstance == nil {
-		return
-	}
-	err := auth.CreateResource(
-		AuthProxyInstance.endpointUrl,
-		[]auth.ResourceScope{auth.ScopeCreate},
-		nil,
-	)
-	if err != nil {
-		logrus.WithError(err).Warn("Failed to register service token endpoint with UMA; continuing without initial UMA registration")
-	}
+	// The service-token endpoint is not protected as its own UMA resource.
+	// Callers prove access to the requested streaming resource instead.
 }
 
 // setCORSProxy adds CORS headers for actor (proxied) responses & token service
@@ -247,16 +238,13 @@ func (ap *AuthProxy) serviceTokenEndpoint(w http.ResponseWriter, r *http.Request
 		return
 	}
 	streamResource, isStream := auth.IsStreamingResource(request.ResourceURL)
-	var extraPermissions []auth.Permission
-	if isStream {
-		extraPermissions = []auth.Permission{{ResourceID: request.ResourceURL, ResourceScopes: []string{string(streamResource.Scope)}}}
-	}
-	logrus.WithFields(logrus.Fields{"ExtraPermissionsAmount": len(extraPermissions), "ResourceID": request.ResourceURL}).Debug("setting extraPermissions")
-	if !auth.AuthorizeRequest(w, r, extraPermissions) {
-		return
-	}
 	if !isStream {
 		http.Error(w, "Resource is not a streaming resource", http.StatusBadRequest)
+		return
+	}
+	requiredPermissions := []auth.Permission{{ResourceID: request.ResourceURL, ResourceScopes: []string{string(streamResource.Scope)}}}
+	logrus.WithFields(logrus.Fields{"ResourceID": request.ResourceURL, "Scope": streamResource.Scope}).Debug("authorizing service token request")
+	if !auth.AuthorizePermissions(w, r, requiredPermissions) {
 		return
 	}
 	if request.SessionID != "" {
@@ -413,20 +401,12 @@ func (ap *AuthProxy) determineStreamLifetime(r *http.Request) (time.Time, time.D
 }
 
 func (ap *AuthProxy) requestStreamTicket(w http.ResponseWriter, r *http.Request) {
-	extra := []auth.Permission{
-		{
-			ResourceID:     ap.endpointUrl,
-			ResourceScopes: []string{string(auth.ScopeCreate)},
-		},
-	}
 	originalAuth := r.Header.Get("Authorization")
 	if originalAuth != "" {
 		r.Header.Del("Authorization")
 		defer r.Header.Set("Authorization", originalAuth)
 	}
-	if auth.AuthorizeRequest(w, r, extra) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-	}
+	auth.AuthorizeRequest(w, r, nil)
 }
 
 func (ap *AuthProxy) scheduleStreamTimerLocked(stream *Stream) {

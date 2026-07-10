@@ -49,11 +49,11 @@ export class OdrlAuthorizer implements Authorizer {
 
         for (const {resource_id, resource_scopes} of query) {
             grantedPermissions[resource_id] = [];
-            const actions = transformActionsCssToOdrl(resource_scopes);
-            for (const action of actions) {
+            const requestedActions = transformActionsCssToOdrl(resource_scopes);
+            for (const { scope, action } of requestedActions) {
                 this.logger.info(`Evaluating Request [R AR]: [${resource_id} ${action}]`);
                 if (policyIndex.evaluate(claims, resource_id, action)) {
-                    grantedPermissions[resource_id].push(action);
+                    grantedPermissions[resource_id].push(scope);
                 }
             }
         }
@@ -61,7 +61,7 @@ export class OdrlAuthorizer implements Authorizer {
         Object.keys(grantedPermissions).forEach(
             resource_id => permissions.push({
                 resource_id,
-                resource_scopes: transformActionsOdrlToCss(grantedPermissions[resource_id])
+                resource_scopes: grantedPermissions[resource_id]
             }) );
         return permissions;
     }
@@ -106,37 +106,22 @@ scopeCssToOdrl.set('urn:example:css:modes:append','http://www.w3.org/ns/odrl/2/a
 scopeCssToOdrl.set('urn:example:css:modes:create','http://www.w3.org/ns/odrl/2/create');
 scopeCssToOdrl.set('urn:example:css:modes:delete','http://www.w3.org/ns/odrl/2/delete');
 scopeCssToOdrl.set('urn:example:css:modes:write','http://www.w3.org/ns/odrl/2/write');
-
-const scopeOdrlToCss : Map<string, string> = new Map(Array.from(scopeCssToOdrl, entry => [entry[1], entry[0]]));
+scopeCssToOdrl.set('urn:knows:uma:scopes:continuous:read','http://www.w3.org/ns/odrl/2/read');
 
 /**
  * Transform the Actions enforced by the Community Solid Server to equivalent ODRL Actions
  * @param actions
  */
-function transformActionsCssToOdrl(actions: string[]): string[] {
+function transformActionsCssToOdrl(actions: string[]): { scope: string; action: string }[] {
     // scopes come from UmaClient.ts -> see CSS package
 
     // in UMAPermissionReader, only the last part of the URN will be used, divided by a colon
     // again, see CSS package
-    return actions.map(action => {
-      const result = scopeCssToOdrl.get(action);
+    return actions.map(scope => {
+      const result = scopeCssToOdrl.get(scope);
       if (!result) {
-        throw new BadRequestHttpError(`Unsupported action ${action}`);
+        throw new BadRequestHttpError(`Unsupported action ${scope}`);
       }
-      return result;
+      return { scope, action: result };
     });
-}
-/**
- * Transform ODRL Actions to equivalent Actions enforced by the Community Solid Server
- * @param actions
- */
-function transformActionsOdrlToCss(actions: string[]): string[] {
-    const cssActions = []
-    for (const action of actions) {
-        if (action === 'http://www.w3.org/ns/odrl/2/use'){
-            return Array.from(scopeCssToOdrl.keys());
-        }
-        cssActions.push(scopeOdrlToCss.get(action)!);
-    }
-    return cssActions;
 }

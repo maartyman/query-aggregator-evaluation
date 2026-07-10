@@ -269,6 +269,12 @@ func SSEHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer initialResp.Body.Close()
 
+	if initialResp.StatusCode == http.StatusOK {
+		logrus.WithFields(logrus.Fields{"url": sseReq.URL}).Info("✅ SSE connection established without UMA challenge, streaming")
+		streamSSEToClient(w, initialResp, sseReq.URL)
+		return
+	}
+
 	if initialResp.StatusCode != http.StatusUnauthorized {
 		logrus.WithFields(logrus.Fields{"status": initialResp.StatusCode}).Error("❌ Expected 401 for SSE, got different status")
 		http.Error(w, fmt.Sprintf("Expected 401 for SSE authentication, got %d", initialResp.StatusCode), http.StatusBadGateway)
@@ -369,7 +375,10 @@ func SSEHandler(w http.ResponseWriter, r *http.Request) {
 
 	logrus.WithFields(logrus.Fields{"url": sseReq.URL}).Info("✅ SSE connection established, streaming")
 
-	// Step 8: Set up SSE response headers
+	streamSSEToClient(w, sseResp, sseReq.URL)
+}
+
+func streamSSEToClient(w http.ResponseWriter, sseResp *http.Response, url string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -386,12 +395,10 @@ func SSEHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 
-	// Flush headers immediately
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 
-	// Step 9: Stream the SSE data
 	buf := make([]byte, 4096)
 	for {
 		n, err := sseResp.Body.Read(buf)
@@ -406,7 +413,7 @@ func SSEHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err == io.EOF {
-			logrus.WithFields(logrus.Fields{"url": sseReq.URL}).Info("📭 SSE stream ended")
+			logrus.WithFields(logrus.Fields{"url": url}).Info("📭 SSE stream ended")
 			return
 		}
 		if err != nil {
