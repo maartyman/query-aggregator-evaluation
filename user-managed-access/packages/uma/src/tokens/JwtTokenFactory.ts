@@ -32,7 +32,7 @@ export class JwtTokenFactory extends TokenFactory {
     protected readonly keyGen: JwkGenerator,
     protected readonly issuer: string,
     protected readonly tokenStore: KeyValueStorage<string, AccessToken>,
-    protected readonly params: JwtTokenParams = { expirationTime: '30m', aud: 'solid' },
+    protected readonly params: JwtTokenParams = { expirationTime: '1w', aud: 'solid' },
   ) {
     super();
   }

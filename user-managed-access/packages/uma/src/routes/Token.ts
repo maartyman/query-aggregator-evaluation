@@ -60,7 +60,7 @@ export class TokenRequestHandler extends HttpHandler {
     storage: IndexedStorage<Record<string, never>>,
     protected readonly keyGen: JwkGenerator,
     protected readonly baseUrl: string,
-    tokenExpiration: string = '30m',
+    tokenExpiration: string = '1w',
     protected readonly policies?: UCRulesStorage,
   ) {
     super();

@@ -18,7 +18,7 @@
           },
           "clockTolerance": 120,
           "cookies": {
-            "long": { "signed": true, "maxAge": 86400000 },
+            "long": { "signed": true, "maxAge": 604800000 },
             "short": { "signed": true }
           },
           "enabledJWA": {

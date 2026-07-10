@@ -147,7 +147,7 @@ describe('Token', (): void => {
         sub: 'charlie',
         iss: baseUrl,
         aud: baseUrl,
-        exp: Math.floor(now/1000) + 1800,
+        exp: Math.floor(now/1000) + 604800,
         jti: expect.any(String),
       });
     });
@@ -235,7 +235,7 @@ describe('Token', (): void => {
           access_token: expect.any(String),
           refresh_token: expect.any(String),
           token_type: 'Bearer',
-          expires_in: 1800,
+          expires_in: 604800,
           scope: 'uma_protection',
         }
       });
@@ -251,7 +251,7 @@ describe('Token', (): void => {
       expect(storage.create).toHaveBeenLastCalledWith(PAT_STORAGE_TYPE, {
         pat: response.body.access_token,
         refreshToken: response.body.refresh_token,
-        expiration: now + 1800 * 1000,
+        expiration: now + 604800 * 1000,
         registration: registrationId,
       });
 
@@ -265,7 +265,7 @@ describe('Token', (): void => {
         sub: userId,
         iss: baseUrl,
         aud: baseUrl,
-        exp: Math.floor(now/1000) + 1800,
+        exp: Math.floor(now/1000) + 604800,
         jti: expect.any(String),
       })
     });
@@ -279,7 +279,7 @@ describe('Token', (): void => {
           access_token: expect.any(String),
           refresh_token: expect.any(String),
           token_type: 'Bearer',
-          expires_in: 1800,
+          expires_in: 604800,
           scope: 'uma_protection',
         }
       });
@@ -289,7 +289,7 @@ describe('Token', (): void => {
         id: 'patId',
         pat: response.body.access_token,
         refreshToken: response.body.refresh_token,
-        expiration: now + 1800 * 1000,
+        expiration: now + 604800 * 1000,
         registration: registrationId,
       });
     });
@@ -373,7 +373,7 @@ describe('Token', (): void => {
           access_token: expect.any(String),
           refresh_token: expect.any(String),
           token_type: 'Bearer',
-          expires_in: 1800,
+          expires_in: 604800,
           scope: 'uma_protection',
         }
       });
@@ -390,7 +390,7 @@ describe('Token', (): void => {
         id: 'patId',
         pat: response.body.access_token,
         refreshToken: response.body.refresh_token,
-        expiration: now + 1800 * 1000,
+        expiration: now + 604800 * 1000,
         registration: registrationId,
       });
     });

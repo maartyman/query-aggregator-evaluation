@@ -52,6 +52,8 @@ type DerivationEntry struct {
 	ResourceRegistrationURL string
 }
 
+const oneWeekSeconds = 7 * 24 * 60 * 60
+
 // NewSolidAuth creates a new SolidAuth instance
 func NewSolidAuth(webId string) *SolidAuth {
 	sa := &SolidAuth{
@@ -301,10 +303,14 @@ func (sa *SolidAuth) performAuthFlow() error {
 		return fmt.Errorf("received empty access token")
 	}
 
+	expiresIn := tokenResp.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = oneWeekSeconds
+	}
 	sa.accessToken = tokenResp.AccessToken
-	sa.expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	sa.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
 
-	logrus.WithFields(logrus.Fields{"expires_at": sa.expiresAt.Format(time.RFC3339), "expires_in_seconds": tokenResp.ExpiresIn}).Info("✅ Access token obtained via client credentials flow")
+	logrus.WithFields(logrus.Fields{"expires_at": sa.expiresAt.Format(time.RFC3339), "expires_in_seconds": expiresIn}).Info("✅ Access token obtained via client credentials flow")
 
 	return nil
 }
@@ -402,9 +408,13 @@ func (sa *SolidAuth) getUmaToken(method, resourceURL string) (tokenType, accessT
 func (sa *SolidAuth) storeUmaToken(method, resourceURL, tokenType, accessToken string, expiresIn int) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
+	effectiveExpiresIn := expiresIn
+	if effectiveExpiresIn <= 0 {
+		effectiveExpiresIn = oneWeekSeconds
+	}
 	var expiresAt time.Time
-	if expiresIn > 0 {
-		expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+	if effectiveExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(effectiveExpiresIn) * time.Second)
 	}
 	sa.umaPermissionTokens[sa.buildUmaKey(method, resourceURL)] = UmaTokenEntry{TokenType: tokenType, AccessToken: accessToken, ExpiresAt: expiresAt}
 }
