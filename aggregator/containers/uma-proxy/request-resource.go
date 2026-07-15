@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,10 @@ var client = &http.Client{} // restored global HTTP client
 var solidAuth *SolidAuth    // restored global SolidAuth instance
 
 const maxConcurrentRequestsPerEndpoint = 10
+
+type requestContextKey string
+
+const originalResourceURLContextKey requestContextKey = "originalResourceURL"
 
 type endpointThrottler struct {
 	mu         sync.Mutex
@@ -175,7 +180,50 @@ func fetchAccessToken(tokenEndpoint string, request interface{}, claims []claimT
 	if okResp.AccessToken == "" || okResp.TokenType == "" {
 		return "", "", "", ManagementAccessToken{}, 0, fmt.Errorf("incomplete token response")
 	}
+	logAccessTokenSummary(okResp.AccessToken, request, okResp.DerivationResourceID)
 	return okResp.AccessToken, okResp.TokenType, okResp.DerivationResourceID, okResp.ManagementAccessToken, okResp.ExpiresIn, nil
+}
+
+func logAccessTokenSummary(token string, request interface{}, derivationResourceID string) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		logrus.WithFields(logrus.Fields{
+			"request":                request,
+			"derivation_resource_id": derivationResourceID,
+		}).Warn("UMA access token is not a JWT")
+		return
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"request":                request,
+			"derivation_resource_id": derivationResourceID,
+			"err":                    err,
+		}).Warn("Unable to decode UMA access token payload")
+		return
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"request":                request,
+			"derivation_resource_id": derivationResourceID,
+			"err":                    err,
+		}).Warn("Unable to parse UMA access token payload")
+		return
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"request":                request,
+		"derivation_resource_id": derivationResourceID,
+		"issuer":                 payload["iss"],
+		"audience":               payload["aud"],
+		"subject":                payload["sub"],
+		"issued_at":              payload["iat"],
+		"expires_at":             payload["exp"],
+		"permissions":            payload["permissions"],
+	}).Info("UMA access token decoded")
 }
 
 // gatherClaims augments the claims slice based on server-required claims.
@@ -338,6 +386,10 @@ func deleteUpstreamDerivationResource(entry DerivationEntry) error {
 func Do(req *http.Request) (*http.Response, error) {
 	// Redirect localhost URLs to host machine
 	originalURL := req.URL.String()
+	resourceURL := originalURL
+	if contextURL, ok := req.Context().Value(originalResourceURLContextKey).(string); ok && contextURL != "" {
+		resourceURL = contextURL
+	}
 	originalHost := req.Host
 	if originalHost == "" {
 		originalHost = req.URL.Host
@@ -364,9 +416,8 @@ func Do(req *http.Request) (*http.Response, error) {
 	}
 	// Attempt to use cached UMA token first
 	method := req.Method
-	resourceURL := req.URL.String()
 	if tokenType, accessToken, ok := solidAuth.getUmaToken(method, resourceURL); ok {
-		logrus.WithFields(logrus.Fields{"url": resourceURL}).Debug("Using cached UMA token")
+		logrus.WithFields(logrus.Fields{"resource_url": resourceURL, "transport_url": req.URL.String()}).Debug("Using cached UMA token")
 		req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
 		cachedResp, err := throttledDo(req)
 		if err != nil {
@@ -375,9 +426,10 @@ func Do(req *http.Request) (*http.Response, error) {
 		if cachedResp.StatusCode != http.StatusUnauthorized {
 			return cachedResp, nil
 		}
+		_ = cachedResp.Body.Close()
 		// Cached token failed; remove and proceed unauthenticated.
 		solidAuth.deleteUmaToken(method, resourceURL)
-		logrus.WithFields(logrus.Fields{"url": resourceURL}).Info("Cached UMA token unauthorized, retrying without token")
+		logrus.WithFields(logrus.Fields{"resource_url": resourceURL, "transport_url": req.URL.String()}).Info("Cached UMA token unauthorized, retrying without token")
 	}
 	// Clear any Authorization header set by failed cached attempt
 	if req.Header.Get("Authorization") != "" {
@@ -410,6 +462,7 @@ func Do(req *http.Request) (*http.Response, error) {
 		}
 		// Store in cache before retry
 		solidAuth.storeUmaToken(method, resourceURL, tokenType, accessToken, expiresIn)
+		registeredDerivationResourceId := ""
 		if derivationResourceId != "" {
 			entry := DerivationEntry{
 				SourceURL:               resourceURL,
@@ -418,9 +471,11 @@ func Do(req *http.Request) (*http.Response, error) {
 				ManagementAccessToken:   managementToken,
 				ResourceRegistrationURL: strings.TrimRight(uma2Config.ResourceRegistrationEndpoint, "/") + "/" + url.PathEscape(derivationResourceId),
 			}
-			solidAuth.storeDerivation(resourceURL, entry)
 			if err := updateUpstreamDerivationResource(uma2Config, entry, resourceURL); err != nil {
 				logrus.WithFields(logrus.Fields{"source": resourceURL, "derivation_resource_id": derivationResourceId, "err": err}).Warn("Failed to update upstream derivation resource metadata")
+			} else {
+				solidAuth.storeDerivation(resourceURL, entry)
+				registeredDerivationResourceId = derivationResourceId
 			}
 		}
 		req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken))
@@ -428,9 +483,17 @@ func Do(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
+		logrus.WithFields(logrus.Fields{
+			"resource_url":           resourceURL,
+			"transport_url":          req.URL.String(),
+			"status_code":            authorizedResp.StatusCode,
+			"status":                 authorizedResp.Status,
+			"www_authenticate":       authorizedResp.Header.Get("WWW-Authenticate"),
+			"derivation_resource_id": registeredDerivationResourceId,
+		}).Info("Authorized UMA retry response")
 		// Derivation headers may not be available now; skip if absent.
-		if derivationResourceId != "" {
-			authorizedResp.Header.Set("X-Derivation-Resource-Id", derivationResourceId)
+		if registeredDerivationResourceId != "" {
+			authorizedResp.Header.Set("X-Derivation-Resource-Id", registeredDerivationResourceId)
 			authorizedResp.Header.Set("X-Derivation-Issuer", asUri)
 		}
 		return authorizedResp, nil

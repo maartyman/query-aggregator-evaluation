@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -189,6 +190,7 @@ func FetchHandler(w http.ResponseWriter, r *http.Request) {
 		req.Host = originalHost
 		logrus.WithFields(logrus.Fields{"original_host": originalHost}).Debug("🔧 Setting Host header to original value")
 	}
+	req = req.WithContext(context.WithValue(req.Context(), originalResourceURLContextKey, originalURLStr))
 
 	// Send the request using the Do function (which handles UMA flow)
 	resp, err := Do(req)

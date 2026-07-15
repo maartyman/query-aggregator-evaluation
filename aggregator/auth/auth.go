@@ -22,6 +22,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 )
 
 var AS_ISSUER = getEnv("AS_ISSUER", "http://localhost:4000/uma")
@@ -232,13 +233,12 @@ func fetchTicket(permissions map[string][]string, issuer string) (string, error)
 	pat := protectionAPIToken
 	protectionAPIMu.RUnlock()
 
-	var resp *http.Response
-	if pat != "" {
-		req.Header.Set("Authorization", pat)
-		resp, err = httpclient.DefaultClient.Do(req)
-	} else {
-		resp, err = doSignedRequest(req)
+	if pat == "" {
+		return "", errors.New("UMA protection API token is not available; cannot request a permission ticket")
 	}
+
+	req.Header.Set("Authorization", pat)
+	resp, err := httpclient.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +331,17 @@ func IntrospectToken(token, issuer string) (IntrospectionResponse, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := doSignedRequest(req)
+	protectionAPIMu.RLock()
+	pat := protectionAPIToken
+	protectionAPIMu.RUnlock()
+
+	var resp *http.Response
+	if pat != "" {
+		req.Header.Set("Authorization", pat)
+		resp, err = httpclient.DefaultClient.Do(req)
+	} else {
+		resp, err = doSignedRequest(req)
+	}
 	if err != nil {
 		return IntrospectionResponse{}, fmt.Errorf("introspection request failed: %w", err)
 	}
@@ -666,21 +676,29 @@ func fetchUmaConfig(issuer string) (UmaConfig, error) {
 	return umaConfig, nil
 }
 
-func InitProtectionAPI(webID string) {
+func InitProtectionAPI(webID string) error {
 	webID = strings.TrimSpace(webID)
 	if webID == "" {
-		logrus.Warn("Skipping UMA protection API bootstrap: missing WebID")
-		return
+		return errors.New("missing WebID")
 	}
-	token, err := createProtectionAPIToken(webID)
-	if err != nil {
-		logrus.WithError(err).Warn("Failed to bootstrap UMA protection API token")
-		return
+
+	var lastErr error
+	for attempt := 1; attempt <= 5; attempt++ {
+		token, err := createProtectionAPIToken(webID)
+		if err == nil {
+			protectionAPIMu.Lock()
+			protectionAPIToken = token
+			protectionAPIMu.Unlock()
+			logrus.WithFields(logrus.Fields{"attempt": attempt}).Info("UMA protection API token bootstrapped")
+			return nil
+		}
+		lastErr = err
+		logrus.WithFields(logrus.Fields{"attempt": attempt, "err": err}).Warn("Failed to bootstrap UMA protection API token")
+		if attempt < 5 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
 	}
-	protectionAPIMu.Lock()
-	protectionAPIToken = token
-	protectionAPIMu.Unlock()
-	logrus.Info("UMA protection API token bootstrapped")
+	return fmt.Errorf("failed to bootstrap UMA protection API token: %w", lastErr)
 }
 
 func createProtectionAPIToken(webID string) (string, error) {

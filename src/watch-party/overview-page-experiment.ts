@@ -7,6 +7,7 @@ import {QueryEngine} from '@comunica/query-sparql';
 import {AsyncIterator, UnionIterator} from "asynciterator";
 import {ExperimentResult} from "../utils/result-builder";
 import {
+  configureAggregatorProxy,
   createAggregatorService,
   getAggregatorServiceWithTimings,
   getDiscoveredAggregatorServiceWithTimings,
@@ -294,12 +295,15 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     expectedMessageLocations: number,
     expectedRoomBindings: number
   ) {
-    if (this.aggregatorIdStore.has(podContext.name)) {
-      return;
-    }
     const auth = new Auth(podContext, {enableCache: true});
     await auth.init();
     await auth.getAccessToken();
+    if (this.experimentConfig.authorizationMode !== "no-auth") {
+      await configureAggregatorProxy(auth);
+    }
+    if (this.aggregatorIdStore.has(podContext.name)) {
+      return;
+    }
 
     // start first aggregator with message locations query
     const messageLocationsId = await createAggregatorService(auth, fnoConfMessageLocations.replace(

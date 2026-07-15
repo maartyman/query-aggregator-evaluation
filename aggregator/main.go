@@ -102,12 +102,18 @@ func main() {
 		Password: *password,
 		LogLevel: logLevelValue,
 	}
-	proxy.SetupProxy(Clientset, proxyConfig)
+	if err := proxy.SetupProxy(Clientset, proxyConfig); err != nil {
+		logrus.WithError(err).Error("Failed to set up UMA proxy")
+		os.Exit(1)
+	}
 
 	serverMux := http.NewServeMux()
 	RegisterServerMetadataEndpoints(serverMux)
 	auth.InitSigning(serverMux)
-	auth.InitProtectionAPI(*webId)
+	if err := auth.InitProtectionAPI(*webId); err != nil {
+		logrus.WithError(err).Error("Failed to bootstrap UMA protection API token")
+		os.Exit(1)
+	}
 	InitializeKubernetes(serverMux)
 	startConfigurationEndpoint(serverMux)
 	SetupResourceRegistration()

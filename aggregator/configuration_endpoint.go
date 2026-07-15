@@ -2,6 +2,7 @@ package main
 
 import (
 	"aggregator/auth"
+	"aggregator/proxy"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -51,6 +52,7 @@ func startConfigurationEndpoint(mux *http.ServeMux) {
 	}
 
 	configurationData.HandleFunc("/config", configurationData.HandleConfigurationEndpoint, resourceScopesRead)
+	configurationData.HandleFunc("/config/proxy", configurationData.HandleProxyEndpoint, resourceScopesReadCreate)
 	configurationData.HandleFunc("/config/actors", configurationData.HandleActorsEndpoint, resourceScopesReadCreate)
 	configurationData.serveMux.HandleFunc("/registration", configurationData.HandleManagementEndpoint)
 	// Catch-all handler for /config/actors/* paths (including non-existent actors)
@@ -67,6 +69,7 @@ func (data *ConfigurationData) registerServerAuthResources() {
 		return
 	}
 	createAuthResource(fmt.Sprintf("%s://%s:%s/config", Protocol, Host, ServerPort), resourceScopesRead, nil)
+	createAuthResource(fmt.Sprintf("%s://%s:%s/config/proxy", Protocol, Host, ServerPort), resourceScopesReadCreate, nil)
 	createAuthResource(fmt.Sprintf("%s://%s:%s/config/actors", Protocol, Host, ServerPort), resourceScopesReadCreate, nil)
 	createAuthResource(fmt.Sprintf("%s://%s:%s/config/actors/", Protocol, Host, ServerPort), resourceScopesReadDelete, nil)
 	RegisterAuthProxyResources()
@@ -102,6 +105,59 @@ func (data *ConfigurationData) HandleConfigurationEndpoint(response http.Respons
 	default:
 		http.Error(response, "Invalid request method", http.StatusMethodNotAllowed)
 	}
+}
+
+type proxyConfigurationRequest struct {
+	WebId    string `json:"webId"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	LogLevel string `json:"logLevel"`
+}
+
+func (data *ConfigurationData) HandleProxyEndpoint(response http.ResponseWriter, request *http.Request) {
+	setCORS(response)
+	if request.Method == http.MethodOptions {
+		response.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if !authorizeRequest(response, request, nil) {
+		return
+	}
+	if request.Method != http.MethodPost {
+		http.Error(response, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var configRequest proxyConfigurationRequest
+	if err := json.NewDecoder(request.Body).Decode(&configRequest); err != nil {
+		http.Error(response, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+	configRequest.WebId = strings.TrimSpace(configRequest.WebId)
+	configRequest.Email = strings.TrimSpace(configRequest.Email)
+	if configRequest.LogLevel == "" {
+		configRequest.LogLevel = LogLevel.String()
+	}
+	if configRequest.WebId == "" || configRequest.Email == "" || configRequest.Password == "" {
+		http.Error(response, "webId, email and password are required", http.StatusBadRequest)
+		return
+	}
+
+	logrus.WithFields(logrus.Fields{"webid": configRequest.WebId, "email": configRequest.Email}).Info("Configuring UMA proxy identity")
+	if err := proxy.SetupProxy(Clientset, proxy.ProxyConfig{
+		WebId:    configRequest.WebId,
+		Email:    configRequest.Email,
+		Password: configRequest.Password,
+		LogLevel: configRequest.LogLevel,
+	}); err != nil {
+		logrus.WithFields(logrus.Fields{"webid": configRequest.WebId, "err": err}).Error("Failed to configure UMA proxy identity")
+		http.Error(response, "Failed to configure UMA proxy identity: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.Write([]byte(`{"ok":true}`))
 }
 
 // headAvailableTransformations HEAD config returns ETag/header info

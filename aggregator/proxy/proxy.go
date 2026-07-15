@@ -56,10 +56,18 @@ func runningPodMatchesConfig(clientset *kubernetes.Clientset, config ProxyConfig
 		for _, entry := range pod.Spec.Containers[0].Env {
 			env[entry.Name] = entry.Value
 		}
+		hasLogMount := false
+		for _, mount := range pod.Spec.Containers[0].VolumeMounts {
+			if mount.Name == "uma-proxy-logs" && mount.MountPath == "/uma-proxy-logs" {
+				hasLogMount = true
+				break
+			}
+		}
 		return env["WEBID"] == config.WebId &&
 			env["EMAIL"] == config.Email &&
 			env["PASSWORD"] == config.Password &&
-			env["LOG_LEVEL"] == config.LogLevel, nil
+			env["LOG_LEVEL"] == config.LogLevel &&
+			hasLogMount, nil
 	}
 
 	return false, nil
@@ -72,8 +80,11 @@ func deleteProxyPods(clientset *kubernetes.Clientset) error {
 	if err != nil {
 		return err
 	}
+	gracePeriod := int64(0)
 	for _, pod := range pods.Items {
-		if err := clientset.CoreV1().Pods("default").Delete(context.Background(), pod.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		if err := clientset.CoreV1().Pods("default").Delete(context.Background(), pod.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: &gracePeriod,
+		}); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -138,6 +149,22 @@ func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
 					Name:            "uma-proxy",
 					Image:           "uma-proxy",
 					ImagePullPolicy: v1.PullNever,
+					Command:         []string{"/bin/sh", "-c"},
+					Args: []string{
+						`set -u
+mkdir -p /uma-proxy-logs
+LOG_FILE="/uma-proxy-logs/uma-proxy-${HOSTNAME:-pod}-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+echo "Writing UMA proxy output to ${LOG_FILE}"
+./uma-proxy >"${LOG_FILE}" 2>&1 &
+app_pid=$!
+tail -n +1 -f "${LOG_FILE}" &
+tail_pid=$!
+wait "${app_pid}"
+status=$?
+kill "${tail_pid}" 2>/dev/null || true
+wait "${tail_pid}" 2>/dev/null || true
+exit "${status}"`,
+					},
 					Ports: []v1.ContainerPort{
 						{ContainerPort: 8080},
 						{ContainerPort: 8443},
@@ -147,6 +174,10 @@ func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
 							Name:      "key-pair",
 							MountPath: "/key-pair",
 							ReadOnly:  true,
+						},
+						{
+							Name:      "uma-proxy-logs",
+							MountPath: "/uma-proxy-logs",
 						},
 					},
 					Env: envVars,
@@ -161,6 +192,15 @@ func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
 						},
 					},
 				},
+				{
+					Name: "uma-proxy-logs",
+					VolumeSource: v1.VolumeSource{
+						HostPath: &v1.HostPathVolumeSource{
+							Path: "/tmp/query-aggregator-evaluation/uma-proxy-logs",
+							Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
+						},
+					},
+				},
 			},
 		},
 	}
@@ -170,6 +210,10 @@ func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
 		return err
 	}
 	return nil
+}
+
+func hostPathTypePtr(hostPathType v1.HostPathType) *v1.HostPathType {
+	return &hostPathType
 }
 
 func serviceExists(clientset *kubernetes.Clientset) (bool, error) {
@@ -215,44 +259,63 @@ func createService(clientset *kubernetes.Clientset) error {
 	return nil
 }
 
-func SetupProxy(clientset *kubernetes.Clientset, config ProxyConfig) {
+func SetupProxy(clientset *kubernetes.Clientset, config ProxyConfig) error {
 	matchesConfig, err := runningPodMatchesConfig(clientset, config)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	if !matchesConfig {
 		logrus.Info("Recreating uma-proxy pod for current authentication configuration")
 		if err := deleteProxyPods(clientset); err != nil {
-			panic(err)
+			return err
 		}
 		if err := waitForProxyPodsDeleted(clientset); err != nil {
-			panic(err)
+			return err
 		}
 	}
 
 	if running, err := isPodRunning(clientset); err != nil || !running {
-		err := createPod(clientset, config)
 		if err != nil {
-			panic(err)
+			return err
+		}
+		if err := createPod(clientset, config); err != nil {
+			return err
 		}
 
-		watcher, _ := clientset.CoreV1().Pods("default").Watch(context.Background(), metav1.ListOptions{
+		watcher, err := clientset.CoreV1().Pods("default").Watch(context.Background(), metav1.ListOptions{
 			FieldSelector: fmt.Sprintf("metadata.name=%s", "uma-proxy"),
 		})
+		if err != nil {
+			return err
+		}
+		defer watcher.Stop()
 
-		for event := range watcher.ResultChan() {
-			pod := event.Object.(*v1.Pod)
-			if pod.Status.Phase == v1.PodRunning {
-				break
-			} else if pod.Status.Phase == v1.PodFailed {
-				panic("proxy pod failed to start")
+		deadline := time.After(60 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				return fmt.Errorf("timed out waiting for uma-proxy pod to start")
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					return fmt.Errorf("uma-proxy pod watch closed before pod started")
+				}
+				pod := event.Object.(*v1.Pod)
+				if pod.Status.Phase == v1.PodRunning {
+					goto podRunning
+				} else if pod.Status.Phase == v1.PodFailed {
+					return fmt.Errorf("proxy pod failed to start")
+				}
 			}
 		}
 	}
+podRunning:
 	if exists, err := serviceExists(clientset); err != nil || !exists {
-		err := createService(clientset)
 		if err != nil {
-			panic(err)
+			return err
+		}
+		if err := createService(clientset); err != nil {
+			return err
 		}
 	}
+	return nil
 }

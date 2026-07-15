@@ -69,6 +69,14 @@ export class Auth {
     }
   }
 
+  get webId(): string {
+    return this.podContext.webId;
+  }
+
+  get email(): string {
+    return this.podContext.email;
+  }
+
   public static setRequestObserver(observer?: (request: ObservedHttpRequest) => void): void {
     requestObserver = observer;
   }

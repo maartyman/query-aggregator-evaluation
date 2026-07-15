@@ -118,7 +118,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -126,7 +126,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 	claims, err := auth.ParseStreamToken(token, ap.baseURL, streamResource.URL)
 	if err != nil {
 		logrus.WithError(err).Warn("Invalid stream token")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -135,7 +135,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 	ap.mutex.RUnlock()
 	if !exists || stream == nil {
 		logrus.WithField("session_id", claims.SessionID).Warn("Stream session not found")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -143,7 +143,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 		logrus.WithFields(logrus.Fields{
 			"session_id": claims.SessionID,
 		}).Warn("Stream token mismatch for session")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -152,7 +152,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 			"session_id": stream.SessionID,
 			"resource":   stream.ResourceURL,
 		}).Warn("Stream resource mismatch")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -160,7 +160,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 		logrus.WithFields(logrus.Fields{
 			"session_id": stream.SessionID,
 		}).Warn("Stream scope mismatch")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -168,7 +168,7 @@ func (ap *AuthProxy) handleStreamRequest(w http.ResponseWriter, r *http.Request,
 		logrus.WithFields(logrus.Fields{
 			"session_id": stream.SessionID,
 		}).Warn("Stream token expired")
-		ap.requestStreamTicket(w, r)
+		ap.requestStreamTicketOrProxy(w, r)
 		return
 	}
 
@@ -400,13 +400,24 @@ func (ap *AuthProxy) determineStreamLifetime(r *http.Request) (time.Time, time.D
 	return exp, ttl, nil
 }
 
-func (ap *AuthProxy) requestStreamTicket(w http.ResponseWriter, r *http.Request) {
+func (ap *AuthProxy) requestStreamTicket(w http.ResponseWriter, r *http.Request) bool {
 	originalAuth := r.Header.Get("Authorization")
 	if originalAuth != "" {
 		r.Header.Del("Authorization")
 		defer r.Header.Set("Authorization", originalAuth)
 	}
-	auth.AuthorizeRequest(w, r, nil)
+	return auth.AuthorizeRequest(w, r, nil)
+}
+
+func (ap *AuthProxy) requestStreamTicketOrProxy(w http.ResponseWriter, r *http.Request) {
+	if !ap.requestStreamTicket(w, r) {
+		return
+	}
+
+	if err := ap.proxyAuthorizedStreamRequest(w, r); err != nil {
+		logrus.WithError(err).Error("Failed to proxy authorized stream request")
+		http.Error(w, "Failed to proxy stream request", http.StatusBadGateway)
+	}
 }
 
 func (ap *AuthProxy) scheduleStreamTimerLocked(stream *Stream) {
@@ -455,6 +466,21 @@ func (ap *AuthProxy) proxyStreamRequest(w http.ResponseWriter, r *http.Request, 
 	return ap.pipeSSE(w, r, registration, relPath, actorID, stream)
 }
 
+func (ap *AuthProxy) proxyAuthorizedStreamRequest(w http.ResponseWriter, r *http.Request) error {
+	actorID, relPath, err := extractActorAndPath(r.URL.Path)
+	if err != nil {
+		return err
+	}
+
+	registration, _, err := resolveRegisteredResource(actorID, relPath)
+	if err != nil {
+		return err
+	}
+
+	logrus.WithFields(logrus.Fields{"actor_id": actorID, "path": relPath}).Info("Proxying authorized streaming request")
+	return ap.pipeSSE(w, r, registration, relPath, actorID, nil)
+}
+
 // pipeSSE opens an upstream SSE connection to the pod and relays it to the client.
 func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registration *ResourceRegistration, relPath string, actorID string, stream *Stream) error {
 	preferredHost := resolveServiceTarget(actorID)
@@ -468,15 +494,20 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 	logrus.WithFields(logrus.Fields{"target": targetURL.Host, "url": targetURL.String()}).Info("Piping SSE to backend")
 
 	cancelableContext, cancel := context.WithCancel(r.Context())
-	ap.mutex.Lock()
-	stream, exists := ap.activeStreams[stream.SessionID]
-	if !exists {
+	if stream != nil {
+		ap.mutex.Lock()
+		activeStream, exists := ap.activeStreams[stream.SessionID]
+		if !exists {
+			ap.mutex.Unlock()
+			cancel()
+			return &streamError{Message: "Stream session not found", Status: http.StatusNotFound}
+		}
+		stream = activeStream
+		stream.cancelFunc = cancel
 		ap.mutex.Unlock()
-		cancel()
-		return &streamError{Message: "Stream session not found", Status: http.StatusNotFound}
+	} else {
+		defer cancel()
 	}
-	stream.cancelFunc = cancel
-	ap.mutex.Unlock()
 	upReq, err := http.NewRequestWithContext(cancelableContext, http.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return err
@@ -506,12 +537,16 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 		if isContextCanceledError(err) {
 			logrus.WithFields(logrus.Fields{"target": targetHost, "path": backendPath}).Error("Upstream SSE context canceled")
 			http.Error(w, "Failed to connect upstream", http.StatusBadGateway)
-			ap.stopStream(stream)
+			if stream != nil {
+				ap.stopStream(stream)
+			}
 			return nil
 		}
 		logrus.WithError(err).WithFields(logrus.Fields{"target": targetHost, "path": backendPath}).Error("Upstream SSE request failed")
 		http.Error(w, "Failed to connect upstream", http.StatusBadGateway)
-		ap.stopStream(stream)
+		if stream != nil {
+			ap.stopStream(stream)
+		}
 		return nil
 	}
 	logrus.WithFields(logrus.Fields{"status": upRes.Status, "target": targetHost, "path": backendPath}).Info("Upstream SSE connected")
@@ -519,7 +554,9 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 	if upRes.StatusCode != http.StatusOK {
 		logrus.WithFields(logrus.Fields{"status": upRes.Status, "target": targetHost, "path": backendPath}).Warn("Upstream SSE non-200")
 		http.Error(w, "Upstream error", http.StatusBadGateway)
-		ap.stopStream(stream)
+		if stream != nil {
+			ap.stopStream(stream)
+		}
 		return nil
 	}
 
@@ -532,7 +569,9 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		ap.stopStream(stream)
+		if stream != nil {
+			ap.stopStream(stream)
+		}
 		return nil
 	}
 
@@ -544,11 +583,15 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 			if _, werr := w.Write(line); werr != nil {
 				if isContextCanceledError(werr) {
 					logrus.Debug("Client closed SSE connection")
-					ap.stopStream(stream)
+					if stream != nil {
+						ap.stopStream(stream)
+					}
 					return nil
 				}
 				logrus.WithError(werr).Warn("Write to client failed")
-				ap.stopStream(stream)
+				if stream != nil {
+					ap.stopStream(stream)
+				}
 				return nil
 			}
 			flusher.Flush()
@@ -556,11 +599,15 @@ func (ap *AuthProxy) pipeSSE(w http.ResponseWriter, r *http.Request, registratio
 		if err != nil {
 			if err == io.EOF || isContextCanceledError(err) {
 				logrus.Debug("Upstream SSE closed")
-				ap.stopStream(stream)
+				if stream != nil {
+					ap.stopStream(stream)
+				}
 				return nil
 			}
 			logrus.WithError(err).Warn("Upstream SSE read error")
-			ap.stopStream(stream)
+			if stream != nil {
+				ap.stopStream(stream)
+			}
 			return nil
 		}
 	}
