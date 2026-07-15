@@ -14,7 +14,7 @@ import {AsyncIterator} from "asynciterator";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
 
-const availableServiceRel = "https://w3id.org/aggregator#availableService";
+const aggregatorFromServiceRel = "https://w3id.org/aggregator#fromService";
 
 const SelectedColumnsMap: Record<string, {
   keys: string[],
@@ -262,8 +262,8 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
       return false;
     }
     return linkHeader.split(",").some(link =>
-      link.includes(`rel="${availableServiceRel}"`) ||
-      link.includes(`rel=${availableServiceRel}`)
+      link.includes(`rel="${aggregatorFromServiceRel}"`) ||
+      link.includes(`rel=${aggregatorFromServiceRel}`)
     );
   }
 

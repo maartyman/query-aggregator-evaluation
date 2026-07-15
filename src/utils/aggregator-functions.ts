@@ -2,7 +2,7 @@ import {Auth} from "./auth";
 import {ExperimentResult, type PhaseTiming} from "./result-builder";
 const aggregatorUrl = "http://localhost:5000/";
 const aggregatorUmaIssuer = "http://localhost:4000/uma";
-const availableServiceRel = "https://w3id.org/aggregator#availableService";
+const aggregatorFromServiceRel = "https://w3id.org/aggregator#fromService";
 const aggregatorReadinessMsPerExpectedBinding = readPositiveIntegerEnv(
   "AGGREGATOR_READINESS_MS_PER_BINDING",
   10_000
@@ -355,7 +355,7 @@ async function fetchServiceDescription(fetchService: FetchLike, serviceUrl: stri
 
 function extractAvailableServiceLinks(headers: Headers): string[] {
   return parseLinkHeader(headers.get("Link"))
-    .filter(link => link.rel === availableServiceRel)
+    .filter(link => link.rel === aggregatorFromServiceRel)
     .map(link => link.href);
 }
 

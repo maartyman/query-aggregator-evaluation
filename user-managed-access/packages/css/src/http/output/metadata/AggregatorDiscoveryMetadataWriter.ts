@@ -1,7 +1,7 @@
 import { addHeader, type HttpResponse, MetadataWriter, type RepresentationMetadata } from '@solid/community-server';
 import { AggregatorDiscoveryStore } from '../../../aggregator/AggregatorDiscoveryStore';
 
-const AVAILABLE_SERVICE_REL = 'https://w3id.org/aggregator#availableService';
+const FROM_SERVICE_REL = 'https://w3id.org/aggregator#fromService';
 
 export class AggregatorDiscoveryMetadataWriter extends MetadataWriter {
   public constructor(
@@ -22,7 +22,7 @@ export class AggregatorDiscoveryMetadataWriter extends MetadataWriter {
     addHeader(
       input.response,
       'Link',
-      services.map(service => `<${service}>; rel="${AVAILABLE_SERVICE_REL}"`),
+      services.map(service => `<${service}>; rel="${FROM_SERVICE_REL}"`),
     );
   }
 }
