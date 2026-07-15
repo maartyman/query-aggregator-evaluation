@@ -1,4 +1,4 @@
-import {type AuthorizationMode, startServers, stopServers} from "./utils/server-functions";
+import {type AuthorizationMode, createServerLogSink, type ServerLogSink, startServers, stopServers} from "./utils/server-functions";
 import * as path from 'path';
 import * as fs from 'fs';
 import type {Experiment} from "./experiment";
@@ -105,6 +105,38 @@ function formatDuration(milliseconds: number): string {
   return parts.join(" ");
 }
 
+function formatFileTimestamp(date: Date): string {
+  return date.toISOString().replace(/[:.]/gu, "-");
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/gu, "_").replace(/^_+|_+$/gu, "") || "experiment";
+}
+
+async function captureProcessOutput<T>(logSink: ServerLogSink, action: () => Promise<T>): Promise<T> {
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+
+  const captureWrite = (stream: "stdout" | "stderr") =>
+    (chunk: unknown, encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void), callback?: (error?: Error | null) => void): boolean => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      logSink.write("EXPERIMENT", stream, text);
+      const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+      done?.();
+      return true;
+    };
+
+  process.stdout.write = captureWrite("stdout") as typeof process.stdout.write;
+  process.stderr.write = captureWrite("stderr") as typeof process.stderr.write;
+
+  try {
+    return await action();
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+  }
+}
+
 function getLoggingOptionsFromEnv(): LoggingOptions | undefined {
   const loggingOptions: LoggingOptions = {};
   if (process.env.EXPERIMENT_LOG_LEVEL) {
@@ -166,7 +198,8 @@ async function runExperiment(
   authorizationMode: AuthorizationMode,
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
-  experimentDataRoot: string = "./experiment-data"
+  experimentDataRoot: string = "./experiment-data",
+  logSink?: ServerLogSink
 ): Promise<ExperimentResult[]> {
   if (loggingOptions?.experiment) {
     Logger.setLevel(loggingOptions.experiment);
@@ -228,7 +261,8 @@ async function runExperiment(
       setup.servers,
       setup.queryUser,
       loggingOptions,
-      resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(",")
+      resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(","),
+      logSink
     );
 
     getAggregatorIdStore().clear();
@@ -262,6 +296,48 @@ async function runExperiment(
   }
 }
 
+async function runExperimentWithLogs(
+  fullExperimentName: string,
+  experimentName: string,
+  experimentConfig: ExperimentConfig,
+  useExistingData: boolean,
+  authorizationMode: AuthorizationMode,
+  loggingOptions?: LoggingOptions,
+  resourceRegistrationAuthorizedWebId?: string,
+  experimentDataRoot?: string,
+  logDirectory: string = "./logs/experiments"
+): Promise<ExperimentResult[]> {
+  const logFilePath = path.resolve(
+    logDirectory,
+    `${formatFileTimestamp(new Date())}_${sanitizeFileName(fullExperimentName)}.log`
+  );
+  const logSink = createServerLogSink(logFilePath);
+  console.log(`Server logs for ${fullExperimentName}: ${logFilePath}`);
+  logSink.write("EXPERIMENT", "system", `Starting ${fullExperimentName}`);
+
+  try {
+    return await captureProcessOutput(
+      logSink,
+      () => runExperiment(
+        experimentName,
+        experimentConfig,
+        useExistingData,
+        authorizationMode,
+        loggingOptions,
+        resourceRegistrationAuthorizedWebId,
+        experimentDataRoot,
+        logSink
+      )
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error);
+    logSink.write("EXPERIMENT", "system", `Failed ${fullExperimentName}: ${message}`);
+    throw error;
+  } finally {
+    await logSink.close();
+  }
+}
+
 async function runExperimentWithRetries(
   fullExperimentName: string,
   experimentName: string,
@@ -270,7 +346,8 @@ async function runExperimentWithRetries(
   authorizationMode: AuthorizationMode,
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
-  experimentDataRoot?: string
+  experimentDataRoot?: string,
+  logDirectory: string = "./logs/experiments"
 ): Promise<ExperimentResult[]> {
   let lastError: unknown;
 
@@ -280,14 +357,16 @@ async function runExperimentWithRetries(
     }
 
     try {
-      return await runExperiment(
+      return await runExperimentWithLogs(
+        fullExperimentName,
         experimentName,
         experimentConfig,
         useExistingData,
         authorizationMode,
         loggingOptions,
         resourceRegistrationAuthorizedWebId,
-        experimentDataRoot
+        experimentDataRoot,
+        logDirectory
       );
     } catch (error) {
       lastError = error;
@@ -325,6 +404,8 @@ async function main() {
 
   const resultsDir = path.resolve('./results');
   fs.mkdirSync(resultsDir, { recursive: true });
+  const logDirectory = path.resolve(process.env.EXPERIMENT_SERVER_LOG_DIR?.trim() || "./logs/experiments");
+  fs.mkdirSync(logDirectory, { recursive: true });
 
   const failedExperiments: Array<{name: string, error: any}> = [];
   const successfulExperiments: string[] = [];
@@ -367,7 +448,8 @@ async function main() {
           authorizationMode,
           loggingOptions,
           resourceRegistrationAuthorizedWebId,
-          experimentDataRoot
+          experimentDataRoot,
+          logDirectory
         );
 
         const resultRunCounts = new Map<string, number>();

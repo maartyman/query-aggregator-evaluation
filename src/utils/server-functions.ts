@@ -1,4 +1,5 @@
 import {type ChildProcess, exec, spawn} from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {PodContext, ServerInstanceContext} from "../data-generator";
@@ -11,6 +12,11 @@ const trackedProcesses = new Map<number, { child: ChildProcess; label: string }>
 const PORT_SHUTDOWN_TIMEOUT_MS = 10_000;
 const PROCESS_SHUTDOWN_GRACE_MS = 2_000;
 const SERVER_READY_LOG_TIMEOUT_MS = 120_000;
+const PERSISTENT_POD_LOG_CONTAINER = "aggregator-control-plane";
+const PERSISTENT_POD_LOG_DIRECTORIES = [
+  "/tmp/query-aggregator-evaluation/incremunica-logs",
+  "/tmp/query-aggregator-evaluation/uma-proxy-logs",
+];
 const UMA_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_UMA_READY";
 const CSS_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_CSS_READY";
 const CSS_PAT_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_CSS_PAT_READY";
@@ -19,6 +25,12 @@ const AGGREGATOR_READY_LOG_PREFIX = "QUERY_AGGREGATOR_EVALUATION_AGGREGATOR_READ
 interface ManagedProcess {
   child: ChildProcess;
   waitForLog(marker: string, timeoutMs?: number): Promise<void>;
+}
+
+export interface ServerLogSink {
+  path: string;
+  write(label: string, stream: "stdout" | "stderr" | "system", text: string): void;
+  close(): Promise<void>;
 }
 
 interface LogWaiter {
@@ -100,7 +112,48 @@ async function killProcessOnPort(port: number): Promise<void> {
   }
 }
 
-function runCommand(command: string, label: string, debug: boolean): ManagedProcess {
+async function clearPersistentPodLogs(logSink?: ServerLogSink): Promise<void> {
+  const quotedDirectories = PERSISTENT_POD_LOG_DIRECTORIES.map(directory => `"${directory}"`).join(" ");
+  const command = `docker exec ${PERSISTENT_POD_LOG_CONTAINER} sh -c 'mkdir -p "$@" && find "$@" -maxdepth 1 -type f -name "*.log" -delete' sh ${quotedDirectories}`;
+  logSink?.write("POD-LOGS", "system", `$ ${command}`);
+  const { stdout, stderr } = await execCommand(command);
+  if (stdout.trim()) {
+    logSink?.write("POD-LOGS", "stdout", stdout);
+  }
+  if (stderr.trim()) {
+    logSink?.write("POD-LOGS", "stderr", stderr);
+  }
+}
+
+export function createServerLogSink(logFilePath: string): ServerLogSink {
+  fsSync.mkdirSync(path.dirname(logFilePath), { recursive: true });
+  const stream = fsSync.createWriteStream(logFilePath, { flags: "a" });
+  let closed = false;
+
+  return {
+    path: logFilePath,
+    write(label: string, outputStream: "stdout" | "stderr" | "system", text: string): void {
+      if (closed) {
+        return;
+      }
+      const timestamp = new Date().toISOString();
+      const trimmed = text.endsWith("\n") ? text.slice(0, -1) : text;
+      const lines = trimmed.length > 0 ? trimmed.split(/\r?\n/u) : [""];
+      for (const line of lines) {
+        stream.write(`[${timestamp}] [${label}] [${outputStream}] ${line}\n`);
+      }
+    },
+    close(): Promise<void> {
+      return new Promise(resolve => {
+        closed = true;
+        stream.end(resolve);
+      });
+    },
+  };
+}
+
+function runCommand(command: string, label: string, logSink?: ServerLogSink): ManagedProcess {
+  logSink?.write(label, "system", `$ ${command}`);
   const child = spawn(command, {
     shell: true,
     stdio: 'pipe',
@@ -128,25 +181,22 @@ function runCommand(command: string, label: string, debug: boolean): ManagedProc
   child.stdout?.on('data', (data: unknown) => {
     const text = String(data);
     stdoutBuffer = (stdoutBuffer + text).slice(-16_000);
+    logSink?.write(label, "stdout", text);
     resolveMatchingWaiters();
-    if (debug) {
-      process.stdout.write(`[${label}] ${data as string}`);
-    }
   });
   child.stderr?.on('data', (data: unknown) => {
     const text = String(data);
     stderrBuffer = (stderrBuffer + text).slice(-4000);
-    if (debug) {
-      process.stderr.write(`[${label}] ${data as string}`);
-    }
+    logSink?.write(label, "stderr", text);
   });
   child.on('error', (err) => {
-    console.error(`[${label}] process error: ${err instanceof Error ? err.message : String(err)}`);
+    logSink?.write(label, "system", `process error: ${err instanceof Error ? err.message : String(err)}`);
   });
   if (child.pid) {
     trackedProcesses.set(child.pid, { child, label });
   }
   child.on('exit', (code, signal) => {
+    logSink?.write(label, "system", `process exited (code ${code}${signal ? `, signal ${signal}` : ""})`);
     if (child.pid) {
       trackedProcesses.delete(child.pid);
     }
@@ -156,9 +206,6 @@ function runCommand(command: string, label: string, debug: boolean): ManagedProc
         `${label} exited before logging "${waiter.marker}"` +
         ` (code ${code}${signal ? `, signal ${signal}` : ""}).`
       ));
-    }
-    if (code && stderrBuffer.trim()) {
-      console.error(`[${label}] stderr before exit:\n${stderrBuffer.trim()}`);
     }
   });
   return {
@@ -272,7 +319,8 @@ export async function startServers(
   servers: ServerInstanceContext[],
   queryUser: PodContext,
   loggingOptions?: LoggingOptions,
-  resourceRegistrationAuthorizedWebId?: string
+  resourceRegistrationAuthorizedWebId?: string,
+  logSink?: ServerLogSink
 ): Promise<void> {
   trackedServers = servers;
 
@@ -282,6 +330,7 @@ export async function startServers(
     killProcessOnPort(server.umaPort),
     killProcessOnPort(server.solidPort)
   ]));
+  await clearPersistentPodLogs(logSink);
   await sleep(1000);
 
   const umaWaits: Array<{ process: ManagedProcess; marker: string }> = [];
@@ -304,7 +353,7 @@ export async function startServers(
       ? `${umaLocation}/bin/main-precompiled.js --mode ${authorizationMode}`
       : `${umaLocation}/bin/main.js`;
     const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
-    const process = runCommand(command, `UMA-${server.index}`, loggingOptions?.uma !== undefined);
+    const process = runCommand(command, `UMA-${server.index}`, logSink);
     umaWaits.push({
       process,
       marker: `${UMA_READY_LOG_PREFIX} port=${server.umaPort} baseUrl=${server.umaBaseUrl}`,
@@ -336,7 +385,7 @@ export async function startServers(
       ? `node ./bin/community-solid-server-precompiled.js`
       : `yarn run community-solid-server`;
     const command = `cd "${cssLocation}" && ${cssCommand} -m . -c ${cssConfigLocation}${cssPatConfigLocation} --baseUrl ${server.solidBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
-    const process = runCommand(command, `CSS-${server.index}`, loggingOptions?.css !== undefined);
+    const process = runCommand(command, `CSS-${server.index}`, logSink);
     cssWaits.push({
       process,
       marker: `${CSS_READY_LOG_PREFIX} port=${server.solidPort} baseUrl=${server.solidBaseUrl}`,
@@ -358,7 +407,7 @@ export async function startServers(
   console.log("Starting aggregator...");
   const aggregatorLogLevel = loggingOptions?.aggregator ?? 'error';
   const aggregatorCommand = `cd "${aggregatorLocation}" && go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${aggregatorLogLevel}`;
-  const aggregatorProcess = runCommand(aggregatorCommand, "AGGREGATOR", loggingOptions?.aggregator !== undefined);
+  const aggregatorProcess = runCommand(aggregatorCommand, "AGGREGATOR", logSink);
   await waitForProcessLogs("aggregator", [{
     process: aggregatorProcess,
     marker: `${AGGREGATOR_READY_LOG_PREFIX} port=5000 baseUrl=http://localhost:5000`,
