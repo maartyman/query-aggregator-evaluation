@@ -48,6 +48,14 @@ func getEnvFirst(keys []string, fallback string) string {
 	return fallback
 }
 
+func getEnvBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
 func main() {
 	webId := flag.String("webid", getEnv("WEBID", ""), "WebID for Solid OIDC authentication")
 	email := flag.String("email", getEnv("EMAIL", ""), "Email for CSS account login")
@@ -101,6 +109,7 @@ func main() {
 		Email:    *email,
 		Password: *password,
 		LogLevel: logLevelValue,
+		FileLogs: getEnvBool("EXPERIMENT_SERVER_FILE_LOGS", false),
 	}
 	if err := proxy.SetupProxy(Clientset, proxyConfig); err != nil {
 		logrus.WithError(err).Error("Failed to set up UMA proxy")

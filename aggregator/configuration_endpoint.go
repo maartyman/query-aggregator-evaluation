@@ -112,6 +112,7 @@ type proxyConfigurationRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	LogLevel string `json:"logLevel"`
+	FileLogs bool   `json:"fileLogs"`
 }
 
 func (data *ConfigurationData) HandleProxyEndpoint(response http.ResponseWriter, request *http.Request) {
@@ -149,6 +150,7 @@ func (data *ConfigurationData) HandleProxyEndpoint(response http.ResponseWriter,
 		Email:    configRequest.Email,
 		Password: configRequest.Password,
 		LogLevel: configRequest.LogLevel,
+		FileLogs: configRequest.FileLogs || getEnvBool("EXPERIMENT_SERVER_FILE_LOGS", false),
 	}); err != nil {
 		logrus.WithFields(logrus.Fields{"webid": configRequest.WebId, "err": err}).Error("Failed to configure UMA proxy identity")
 		http.Error(response, "Failed to configure UMA proxy identity: "+err.Error(), http.StatusBadGateway)

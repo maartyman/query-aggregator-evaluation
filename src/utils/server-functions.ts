@@ -152,7 +152,7 @@ export function createServerLogSink(logFilePath: string): ServerLogSink {
   };
 }
 
-function runCommand(command: string, label: string, logSink?: ServerLogSink): ManagedProcess {
+function runCommand(command: string, label: string, logSink?: ServerLogSink, debug = false): ManagedProcess {
   logSink?.write(label, "system", `$ ${command}`);
   const child = spawn(command, {
     shell: true,
@@ -183,14 +183,23 @@ function runCommand(command: string, label: string, logSink?: ServerLogSink): Ma
     stdoutBuffer = (stdoutBuffer + text).slice(-16_000);
     logSink?.write(label, "stdout", text);
     resolveMatchingWaiters();
+    if (debug && !logSink) {
+      process.stdout.write(`[${label}] ${data as string}`);
+    }
   });
   child.stderr?.on('data', (data: unknown) => {
     const text = String(data);
     stderrBuffer = (stderrBuffer + text).slice(-4000);
     logSink?.write(label, "stderr", text);
+    if (debug && !logSink) {
+      process.stderr.write(`[${label}] ${data as string}`);
+    }
   });
   child.on('error', (err) => {
     logSink?.write(label, "system", `process error: ${err instanceof Error ? err.message : String(err)}`);
+    if (!logSink) {
+      console.error(`[${label}] process error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   });
   if (child.pid) {
     trackedProcesses.set(child.pid, { child, label });
@@ -206,6 +215,9 @@ function runCommand(command: string, label: string, logSink?: ServerLogSink): Ma
         `${label} exited before logging "${waiter.marker}"` +
         ` (code ${code}${signal ? `, signal ${signal}` : ""}).`
       ));
+    }
+    if (code && stderrBuffer.trim() && !logSink) {
+      console.error(`[${label}] stderr before exit:\n${stderrBuffer.trim()}`);
     }
   });
   return {
@@ -330,7 +342,9 @@ export async function startServers(
     killProcessOnPort(server.umaPort),
     killProcessOnPort(server.solidPort)
   ]));
-  await clearPersistentPodLogs(logSink);
+  if (logSink) {
+    await clearPersistentPodLogs(logSink);
+  }
   await sleep(1000);
 
   const umaWaits: Array<{ process: ManagedProcess; marker: string }> = [];
@@ -353,7 +367,7 @@ export async function startServers(
       ? `${umaLocation}/bin/main-precompiled.js --mode ${authorizationMode}`
       : `${umaLocation}/bin/main.js`;
     const command = `cd ${umaLocation} && node ${umaEntry} --port ${server.umaPort} --config-location ${umaConfigLocation} --base-url ${server.umaBaseUrl} --policy-base ${server.solidBaseUrl} --log-level ${umaLogLevel}${authorizedWebIdOption}`;
-    const process = runCommand(command, `UMA-${server.index}`, logSink);
+    const process = runCommand(command, `UMA-${server.index}`, logSink, loggingOptions?.uma !== undefined);
     umaWaits.push({
       process,
       marker: `${UMA_READY_LOG_PREFIX} port=${server.umaPort} baseUrl=${server.umaBaseUrl}`,
@@ -385,7 +399,7 @@ export async function startServers(
       ? `node ./bin/community-solid-server-precompiled.js`
       : `yarn run community-solid-server`;
     const command = `cd "${cssLocation}" && ${cssCommand} -m . -c ${cssConfigLocation}${cssPatConfigLocation} --baseUrl ${server.solidBaseUrl} -f "${serverDataPath}" -p ${server.solidPort} -l ${cssLogLevel}`;
-    const process = runCommand(command, `CSS-${server.index}`, logSink);
+    const process = runCommand(command, `CSS-${server.index}`, logSink, loggingOptions?.css !== undefined);
     cssWaits.push({
       process,
       marker: `${CSS_READY_LOG_PREFIX} port=${server.solidPort} baseUrl=${server.solidBaseUrl}`,
@@ -406,8 +420,9 @@ export async function startServers(
   const queryUserWebId = `${queryUser.baseUrl}/profile/card#me`;
   console.log("Starting aggregator...");
   const aggregatorLogLevel = loggingOptions?.aggregator ?? 'error';
-  const aggregatorCommand = `cd "${aggregatorLocation}" && go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${aggregatorLogLevel}`;
-  const aggregatorProcess = runCommand(aggregatorCommand, "AGGREGATOR", logSink);
+  const aggregatorFileLogs = logSink ? "1" : "0";
+  const aggregatorCommand = `cd "${aggregatorLocation}" && EXPERIMENT_SERVER_FILE_LOGS=${aggregatorFileLogs} go run . --webid ${queryUserWebId} --email ${queryUser.email} --password password --log-level ${aggregatorLogLevel}`;
+  const aggregatorProcess = runCommand(aggregatorCommand, "AGGREGATOR", logSink, loggingOptions?.aggregator !== undefined);
   await waitForProcessLogs("aggregator", [{
     process: aggregatorProcess,
     marker: `${AGGREGATOR_READY_LOG_PREFIX} port=5000 baseUrl=http://localhost:5000`,

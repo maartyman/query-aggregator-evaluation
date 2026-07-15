@@ -121,6 +121,8 @@ export async function configureAggregatorProxy(auth: Auth): Promise<void> {
       email: auth.email,
       password: "password",
       logLevel: process.env.AGGREGATOR_LOG_LEVEL ?? "error",
+      fileLogs: ["1", "true", "yes", "on"].includes((process.env.EXPERIMENT_SERVER_FILE_LOGS ?? "").trim().toLowerCase()) ||
+        Boolean(process.env.EXPERIMENT_SERVER_LOG_DIR?.trim()),
     }),
   });
   if (!response.ok) {

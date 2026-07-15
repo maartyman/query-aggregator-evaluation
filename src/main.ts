@@ -71,9 +71,20 @@ function getNonNegativeIntegerEnv(name: string, fallback: number): number {
   return Math.floor(parsed);
 }
 
+function getBooleanEnv(name: string, fallback = false): boolean {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === "") {
+    return fallback;
+  }
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 const WARMUP_RUNS = getNonNegativeIntegerEnv("WARMUP_RUNS", 1);
 const RECORDED_RUNS = getNonNegativeIntegerEnv("RECORDED_RUNS", 30);
 const EXPERIMENT_ATTEMPTS = Math.max(1, getNonNegativeIntegerEnv("EXPERIMENT_ATTEMPTS", 5));
+const ENABLE_EXPERIMENT_SERVER_FILE_LOGS =
+  getBooleanEnv("EXPERIMENT_SERVER_FILE_LOGS") ||
+  Boolean(process.env.EXPERIMENT_SERVER_LOG_DIR?.trim());
 
 function formatTimestamp(date: Date): string {
   return date.toLocaleString(undefined, {
@@ -347,7 +358,7 @@ async function runExperimentWithRetries(
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
   experimentDataRoot?: string,
-  logDirectory: string = "./logs/experiments"
+  logDirectory?: string
 ): Promise<ExperimentResult[]> {
   let lastError: unknown;
 
@@ -357,16 +368,28 @@ async function runExperimentWithRetries(
     }
 
     try {
-      return await runExperimentWithLogs(
-        fullExperimentName,
+      if (logDirectory) {
+        return await runExperimentWithLogs(
+          fullExperimentName,
+          experimentName,
+          experimentConfig,
+          useExistingData,
+          authorizationMode,
+          loggingOptions,
+          resourceRegistrationAuthorizedWebId,
+          experimentDataRoot,
+          logDirectory
+        );
+      }
+
+      return await runExperiment(
         experimentName,
         experimentConfig,
         useExistingData,
         authorizationMode,
         loggingOptions,
         resourceRegistrationAuthorizedWebId,
-        experimentDataRoot,
-        logDirectory
+        experimentDataRoot
       );
     } catch (error) {
       lastError = error;
@@ -404,8 +427,12 @@ async function main() {
 
   const resultsDir = path.resolve('./results');
   fs.mkdirSync(resultsDir, { recursive: true });
-  const logDirectory = path.resolve(process.env.EXPERIMENT_SERVER_LOG_DIR?.trim() || "./logs/experiments");
-  fs.mkdirSync(logDirectory, { recursive: true });
+  const logDirectory = ENABLE_EXPERIMENT_SERVER_FILE_LOGS
+    ? path.resolve(process.env.EXPERIMENT_SERVER_LOG_DIR?.trim() || "./logs/experiments")
+    : undefined;
+  if (logDirectory) {
+    fs.mkdirSync(logDirectory, { recursive: true });
+  }
 
   const failedExperiments: Array<{name: string, error: any}> = [];
   const successfulExperiments: string[] = [];

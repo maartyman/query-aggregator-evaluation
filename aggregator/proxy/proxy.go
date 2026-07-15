@@ -18,6 +18,7 @@ type ProxyConfig struct {
 	Email    string
 	Password string
 	LogLevel string
+	FileLogs bool
 }
 
 func isPodRunning(clientset *kubernetes.Clientset) (bool, error) {
@@ -67,7 +68,7 @@ func runningPodMatchesConfig(clientset *kubernetes.Clientset, config ProxyConfig
 			env["EMAIL"] == config.Email &&
 			env["PASSWORD"] == config.Password &&
 			env["LOG_LEVEL"] == config.LogLevel &&
-			hasLogMount, nil
+			hasLogMount == config.FileLogs, nil
 	}
 
 	return false, nil
@@ -136,22 +137,37 @@ func createPod(clientset *kubernetes.Clientset, config ProxyConfig) error {
 		},
 	}
 
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "uma-proxy",
-			Labels: map[string]string{
-				"app": "uma-proxy",
+	container := v1.Container{
+		Name:            "uma-proxy",
+		Image:           "uma-proxy",
+		ImagePullPolicy: v1.PullNever,
+		Ports: []v1.ContainerPort{
+			{ContainerPort: 8080},
+			{ContainerPort: 8443},
+		},
+		VolumeMounts: []v1.VolumeMount{
+			{
+				Name:      "key-pair",
+				MountPath: "/key-pair",
+				ReadOnly:  true,
 			},
 		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:            "uma-proxy",
-					Image:           "uma-proxy",
-					ImagePullPolicy: v1.PullNever,
-					Command:         []string{"/bin/sh", "-c"},
-					Args: []string{
-						`set -u
+		Env: envVars,
+	}
+	volumes := []v1.Volume{
+		{
+			Name: "key-pair",
+			VolumeSource: v1.VolumeSource{
+				Secret: &v1.SecretVolumeSource{
+					SecretName: "uma-proxy-key-pair",
+				},
+			},
+		},
+	}
+	if config.FileLogs {
+		container.Command = []string{"/bin/sh", "-c"}
+		container.Args = []string{
+			`set -u
 mkdir -p /uma-proxy-logs
 LOG_FILE="/uma-proxy-logs/uma-proxy-${HOSTNAME:-pod}-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 echo "Writing UMA proxy output to ${LOG_FILE}"
@@ -164,44 +180,32 @@ status=$?
 kill "${tail_pid}" 2>/dev/null || true
 wait "${tail_pid}" 2>/dev/null || true
 exit "${status}"`,
-					},
-					Ports: []v1.ContainerPort{
-						{ContainerPort: 8080},
-						{ContainerPort: 8443},
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "key-pair",
-							MountPath: "/key-pair",
-							ReadOnly:  true,
-						},
-						{
-							Name:      "uma-proxy-logs",
-							MountPath: "/uma-proxy-logs",
-						},
-					},
-					Env: envVars,
+		}
+		container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+			Name:      "uma-proxy-logs",
+			MountPath: "/uma-proxy-logs",
+		})
+		volumes = append(volumes, v1.Volume{
+			Name: "uma-proxy-logs",
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
+					Path: "/tmp/query-aggregator-evaluation/uma-proxy-logs",
+					Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
 				},
 			},
-			Volumes: []v1.Volume{
-				{
-					Name: "key-pair",
-					VolumeSource: v1.VolumeSource{
-						Secret: &v1.SecretVolumeSource{
-							SecretName: "uma-proxy-key-pair",
-						},
-					},
-				},
-				{
-					Name: "uma-proxy-logs",
-					VolumeSource: v1.VolumeSource{
-						HostPath: &v1.HostPathVolumeSource{
-							Path: "/tmp/query-aggregator-evaluation/uma-proxy-logs",
-							Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
-						},
-					},
-				},
+		})
+	}
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "uma-proxy",
+			Labels: map[string]string{
+				"app": "uma-proxy",
 			},
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{container},
+			Volumes:    volumes,
 		},
 	}
 	_, err := clientset.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{})

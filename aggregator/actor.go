@@ -38,23 +38,44 @@ func createLogicalActor() Actor {
 // TODO This needs to be more generic and extensible
 func createActor(pipelineDescription string) (Actor, error) {
 	id := uuid.New().String()
+	fileLogs := getEnvBool("EXPERIMENT_SERVER_FILE_LOGS", false)
 
-	podScafolding := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: id,
-			Labels: map[string]string{
-				"app": id, // Important for service selector!
+	container := v1.Container{
+		Name:            "transformation",
+		Image:           "incremunica",
+		ImagePullPolicy: v1.PullNever,
+		Env: []v1.EnvVar{
+			{Name: "PIPELINE_DESCRIPTION", Value: fmt.Sprintf("%v", pipelineDescription)},
+			{Name: "HTTP_PROXY", Value: "http://uma-proxy-service.default.svc.cluster.local:8080"},
+			{Name: "HTTPS_PROXY", Value: "http://uma-proxy-service.default.svc.cluster.local:8443"},
+			{Name: "SSL_CERT_FILE", Value: "/key-pair/uma-proxy.crt"},
+			{Name: "LOG_LEVEL", Value: LogLevel.String()},
+		},
+		Ports: []v1.ContainerPort{
+			{ContainerPort: 8080},
+		},
+		VolumeMounts: []v1.VolumeMount{
+			{
+				Name:      "key-pair",
+				MountPath: "/key-pair",
+				ReadOnly:  true,
 			},
 		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:            "transformation",
-					Image:           "incremunica",
-					ImagePullPolicy: v1.PullNever,
-					Command:         []string{"/bin/sh", "-c"},
-					Args: []string{
-						`set -u
+	}
+	volumes := []v1.Volume{
+		{
+			Name: "key-pair",
+			VolumeSource: v1.VolumeSource{
+				Secret: &v1.SecretVolumeSource{
+					SecretName: "uma-proxy-key-pair",
+				},
+			},
+		},
+	}
+	if fileLogs {
+		container.Command = []string{"/bin/sh", "-c"}
+		container.Args = []string{
+			`set -u
 mkdir -p /incremunica-logs
 LOG_FILE="/incremunica-logs/incremunica-${HOSTNAME:-actor}-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 echo "Writing Incremunica output to ${LOG_FILE}"
@@ -67,49 +88,32 @@ status=$?
 kill "${tail_pid}" 2>/dev/null || true
 wait "${tail_pid}" 2>/dev/null || true
 exit "${status}"`,
-					},
-					Env: []v1.EnvVar{
-						{Name: "PIPELINE_DESCRIPTION", Value: fmt.Sprintf("%v", pipelineDescription)},
-						{Name: "HTTP_PROXY", Value: "http://uma-proxy-service.default.svc.cluster.local:8080"},
-						{Name: "HTTPS_PROXY", Value: "http://uma-proxy-service.default.svc.cluster.local:8443"},
-						{Name: "SSL_CERT_FILE", Value: "/key-pair/uma-proxy.crt"},
-						{Name: "LOG_LEVEL", Value: LogLevel.String()},
-					},
-					Ports: []v1.ContainerPort{
-						{ContainerPort: 8080},
-					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "key-pair",
-							MountPath: "/key-pair",
-							ReadOnly:  true,
-						},
-						{
-							Name:      "incremunica-logs",
-							MountPath: "/incremunica-logs",
-						},
-					},
+		}
+		container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+			Name:      "incremunica-logs",
+			MountPath: "/incremunica-logs",
+		})
+		volumes = append(volumes, v1.Volume{
+			Name: "incremunica-logs",
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
+					Path: "/tmp/query-aggregator-evaluation/incremunica-logs",
+					Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
 				},
 			},
-			Volumes: []v1.Volume{
-				{
-					Name: "key-pair",
-					VolumeSource: v1.VolumeSource{
-						Secret: &v1.SecretVolumeSource{
-							SecretName: "uma-proxy-key-pair",
-						},
-					},
-				},
-				{
-					Name: "incremunica-logs",
-					VolumeSource: v1.VolumeSource{
-						HostPath: &v1.HostPathVolumeSource{
-							Path: "/tmp/query-aggregator-evaluation/incremunica-logs",
-							Type: hostPathTypePtr(v1.HostPathDirectoryOrCreate),
-						},
-					},
-				},
+		})
+	}
+
+	podScafolding := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: id,
+			Labels: map[string]string{
+				"app": id, // Important for service selector!
 			},
+		},
+		Spec: v1.PodSpec{
+			Containers:    []v1.Container{container},
+			Volumes:       volumes,
 			RestartPolicy: v1.RestartPolicyOnFailure,
 		},
 	}
