@@ -82,6 +82,7 @@ export class UmaClient implements SingleThreaded {
 
   protected readonly configCache: NodeJS.Dict<{ config: UmaConfig, expiration: number }> = {};
   protected readonly patStorage: NodeJS.Dict<{ pat: string, expiration: number }> = {};
+  protected readonly jwkSetCache: NodeJS.Dict<ReturnType<typeof createRemoteJWKSet>> = {};
 
   /**
    * @param umaIdStore - Key/value store containing the resource path -> UMA ID bindings.
@@ -226,8 +227,17 @@ export class UmaClient implements SingleThreaded {
     return json.ticket;
   }
 
+  protected getJwkSet(jwks: string): ReturnType<typeof createRemoteJWKSet> {
+    const cached = this.jwkSetCache[jwks];
+    if (cached) return cached;
+
+    const jwkSet = createRemoteJWKSet(new URL(jwks));
+    this.jwkSetCache[jwks] = jwkSet;
+    return jwkSet;
+  }
+
   private async verifyTokenData(token: string, issuer: string, jwks: string): Promise<UmaClaims> {
-    const jwkSet = await createRemoteJWKSet(new URL(jwks));
+    const jwkSet = this.getJwkSet(jwks);
 
     const { payload } = await jwtVerify(token, jwkSet, {
       ...this.options,
