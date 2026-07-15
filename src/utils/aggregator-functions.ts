@@ -3,6 +3,22 @@ import {ExperimentResult, type PhaseTiming} from "./result-builder";
 const aggregatorUrl = "http://localhost:5000/";
 const aggregatorUmaIssuer = "http://localhost:4000/uma";
 const availableServiceRel = "https://w3id.org/aggregator#availableService";
+const aggregatorReadinessMsPerExpectedBinding = readPositiveIntegerEnv(
+  "AGGREGATOR_READINESS_MS_PER_BINDING",
+  10_000
+);
+const aggregatorReadinessProgressGraceMs = readPositiveIntegerEnv(
+  "AGGREGATOR_READINESS_PROGRESS_GRACE_MS",
+  120_000
+);
+const aggregatorReadinessMaxExtensionMs = readPositiveIntegerEnv(
+  "AGGREGATOR_READINESS_MAX_EXTENSION_MS",
+  300_000
+);
+const aggregatorReadinessPollMs = readPositiveIntegerEnv(
+  "AGGREGATOR_READINESS_POLL_MS",
+  5_000
+);
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type FetchClient = Auth | FetchLike;
 export interface TimedAggregatorResult {
@@ -13,6 +29,15 @@ export interface TimedAggregatorResult {
 
 function getFetch(client: FetchClient): FetchLike {
   return typeof client === "function" ? client : client.fetch.bind(client);
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function appendPhase(
@@ -85,6 +110,24 @@ export async function createAggregatorService(auth: Auth, FnoDescription: string
   return id;
 }
 
+export async function configureAggregatorProxy(auth: Auth): Promise<void> {
+  const response = await auth.fetch(`${aggregatorUrl}config/proxy`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      webId: auth.webId,
+      email: auth.email,
+      password: "password",
+      logLevel: process.env.AGGREGATOR_LOG_LEVEL ?? "error",
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to configure aggregator proxy: ${await response.text()}`);
+  }
+}
+
 export async function registerAggregatorServiceDescription(auth: Auth, FnoDescription: string): Promise<string> {
   const response = await auth.fetch(`${aggregatorUrl}config/actors?descriptionOnly=true`, {
     method: "POST",
@@ -139,7 +182,7 @@ export async function getDiscoveredAggregatorServiceWithTimings(
     service.outputUrl,
     phaseTimings,
     cumulativeMs,
-    (response, body) => `Failed to get discovered aggregator service. service: ${service.descriptionUrl}, status: ${response.status}, body: ${body}`
+    (response, body) => `Failed to get discovered aggregator service. description: ${service.descriptionUrl}, output: ${service.outputUrl}, status: ${response.status}, body: ${body}`
   );
   return {
     json,
@@ -464,17 +507,33 @@ async function drainResponse(response: Response): Promise<void> {
 export async function waitForAggregatorService(auth: Auth, serviceId: string, expectedBindings: number | null = 0): Promise<void> {
   const timeoutMs = expectedBindings === null
     ? 120_000
-    : Math.max(120_000, expectedBindings * 5_000);
-  const pollMs = 500;
-  const deadline = Date.now() + timeoutMs;
+    : Math.max(120_000, expectedBindings * aggregatorReadinessMsPerExpectedBinding);
+  const pollMs = aggregatorReadinessPollMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const hardDeadline = deadline + aggregatorReadinessMaxExtensionMs;
   let lastError: unknown;
+  let maxObservedBindings = -1;
+  let lastProgressAt = startedAt;
 
-  while (Date.now() < deadline) {
+  while (
+    Date.now() < deadline ||
+    (
+      expectedBindings !== null &&
+      maxObservedBindings > 0 &&
+      Date.now() - lastProgressAt <= aggregatorReadinessProgressGraceMs &&
+      Date.now() < hardDeadline
+    )
+  ) {
     try {
       const result = await getAggregatorService(auth, serviceId);
       const bindings = result?.results?.bindings;
       if (Array.isArray(bindings) && (expectedBindings === null || bindings.length >= expectedBindings)) {
         return;
+      }
+      if (Array.isArray(bindings) && bindings.length > maxObservedBindings) {
+        maxObservedBindings = bindings.length;
+        lastProgressAt = Date.now();
       }
       lastError = new Error(
         `Aggregator service ${serviceId} returned ${Array.isArray(bindings) ? bindings.length : "no"} binding(s).` +
@@ -486,5 +545,10 @@ export async function waitForAggregatorService(auth: Auth, serviceId: string, ex
     await new Promise(resolve => setTimeout(resolve, pollMs));
   }
 
-  throw new Error(`Aggregator service ${serviceId} did not become readable within ${timeoutMs}ms: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  const waitedMs = Date.now() - startedAt;
+  throw new Error(
+    `Aggregator service ${serviceId} did not become readable within ${waitedMs}ms` +
+    (expectedBindings === null ? "" : `; max observed ${Math.max(0, maxObservedBindings)}/${expectedBindings} binding(s)`) +
+    `: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+  );
 }

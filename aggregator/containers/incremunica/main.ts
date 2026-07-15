@@ -61,7 +61,7 @@ class SSEConnectionManager {
     let message = `event: ${event}\n`
     if (data !== undefined && data !== null) {
       if (typeof data === 'string') {
-        message = `data: ${data}\n`;
+        message += `data: ${data}\n`;
       } else {
         message += `data: ${JSON.stringify(data)}\n`;
       }
@@ -157,6 +157,45 @@ const registeredSources: Map<string, {
 
 function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function serializeError(error: unknown): any {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+  return {
+    message: (error as any)?.toString?.() ?? String(error),
+    value: error
+  };
+}
+
+function summarizeBindingObject(binding: any): any {
+  if (!binding || typeof binding !== "object") {
+    return binding;
+  }
+  const summary: Record<string, any> = {};
+  for (const [key, value] of Object.entries(binding)) {
+    const term = value as any;
+    summary[key] = term && typeof term === "object"
+      ? { type: term.type, value: term.value }
+      : term;
+  }
+  return summary;
+}
+
+function summarizeBindings(bindings: any): any {
+  try {
+    return summarizeBindingObject(bindingToSparqlJson(bindings).bindings[0]);
+  } catch (error) {
+    return {
+      error: serializeError(error),
+      fallback: bindings?.toString?.() ?? String(bindings)
+    };
+  }
 }
 
 function summarizeSourceTerm(term: any): any {
@@ -413,7 +452,7 @@ async function registerWithAggregator(): Promise<void> {
   await registerEndpointWithAggregator(
     "/",
     "SPARQL SELECT incremental query service - JSON results",
-    ["urn:knows:uma:scopes:read"]
+    ["urn:example:css:modes:read"]
   );
 
   // Register the server-sent events endpoint
@@ -525,7 +564,6 @@ async function main() {
       logger.info({ method: req.method, url: req.url }, 'Incoming request');
       if (req.method === "GET" && req.url === "/") {
         res.writeHead(200, { "Content-Type": "application/sparql-results+json" });
-        deferredEvaluationTrigger.emit("update");
         logger.info({ bindings: materializedView.size, cacheDirty: isCacheDirty }, 'Serving materialized view');
 
         if (isCacheDirty) {
@@ -544,9 +582,6 @@ async function main() {
           "Cache-Control": "no-cache",
           "Connection": "keep-alive"
         });
-        const timeout = setInterval(() => {
-          deferredEvaluationTrigger.emit("update");
-        }, 1000);
 
         sseManager.addConnection(res);
 
@@ -562,7 +597,6 @@ async function main() {
         }
 
         req.on('close', () => {
-          timeout.close();
           sseManager.removeConnection(res);
         });
       } else {
@@ -742,9 +776,19 @@ SELECT ?queryString ?source ?endpoint ?variable WHERE {
           materializedView.delete(key);
         }
         isCacheDirty = true;
-        logger.info({ bindings: materializedView.size, keyHash: hashText(key) }, 'Binding deletion received');
-        sseManager.queueUpdate(false, bindingToSparqlJson(bindings).bindings[0]);
+        const bindingObject = bindingToSparqlJson(bindings).bindings[0];
+        logger.info({
+          bindings: materializedView.size,
+          keyHash: hashText(key),
+          binding: summarizeBindingObject(bindingObject)
+        }, 'Binding deletion received');
+        sseManager.queueUpdate(false, bindingObject);
       } else {
+        logger.error({
+          keyHash: hashText(key),
+          binding: summarizeBindings(bindings),
+          materializedViewSize: materializedView.size
+        }, 'Received deletion for binding that was not in the materialized view');
         throw new Error('Received a deletion for a binding that was not in the materialized view:' + key);
       }
     }
@@ -753,7 +797,7 @@ SELECT ?queryString ?source ?endpoint ?variable WHERE {
     logger.info('Query execution finished');
   });
   bindingsStream.on('error', (error) => {
-    logger.error({ error }, 'Error during query execution');
+    logger.error({ error: serializeError(error) }, 'Error during query execution');
   });
 
   await new Promise(resolve => server.on("close", resolve));
@@ -788,16 +832,11 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
         throw new Error(`Failed to fetch from SPARQL endpoint ${descriptor.endpoint}: ${response.status} ${response.statusText}`);
       }
       const json = await response.json();
-      const endpointSources: string[] = [];
-      if (json?.results?.bindings && Array.isArray(json.results.bindings)) {
-        json.results.bindings.forEach((binding: any) => {
-          endpointSources.push(...collectSourcesFromBindingObject(binding, descriptor.variables));
-        });
-      }
+      const endpointSources = collectSourcesFromSparqlJson(json, descriptor.variables);
       logger.info({ count: endpointSources.length, endpoint: descriptor.endpoint }, 'Sources collected from endpoint');
       return endpointSources;
     } catch (e) {
-      logger.error({ endpoint: descriptor.endpoint, error: e }, 'Dynamic sources fetch error');
+      logger.error({ endpoint: descriptor.endpoint, error: serializeError(e) }, 'Dynamic sources fetch error');
       return [];
     }
   }
@@ -811,7 +850,11 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
 
   // Dynamic refcounts across all dynamic endpoints
   const dynamicRefCounts: Map<string, number> = new Map();
-  initialDynamicSourcesLists.forEach(list => {
+  const endpointSourceCounts: Map<string, Map<string, number>> = new Map();
+  initialDynamicSourcesLists.forEach((list, index) => {
+    const descriptor = dynamicEndpoints[index];
+    const endpointCounts = countSources(list);
+    endpointSourceCounts.set(descriptor.endpoint, endpointCounts);
     for (const s of list) {
       dynamicRefCounts.set(s, (dynamicRefCounts.get(s) ?? 0) + 1);
     }
@@ -848,6 +891,110 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
   }
 
   const sseCleanupFunctions: Array<() => void> = [];
+
+  function incrementDynamicSourceReference(source: string, count = 1): void {
+    const prevCount = dynamicRefCounts.get(source) ?? 0;
+    const nextCount = prevCount + count;
+    dynamicRefCounts.set(source, nextCount);
+    if (prevCount === 0 && nextCount > 0 && !staticSources.has(source)) {
+      querySourceIterator.addSource(source);
+      logger.info({ source, sourceHash: hashText(source), previousRefCount: prevCount, nextRefCount: nextCount }, 'Dynamic source added to query iterator');
+    }
+  }
+
+  function decrementDynamicSourceReference(source: string, count = 1, reason = 'unknown'): void {
+    const prevCount = dynamicRefCounts.get(source) ?? 0;
+    const nextCount = Math.max(0, prevCount - count);
+    if (nextCount === 0) {
+      dynamicRefCounts.delete(source);
+    } else {
+      dynamicRefCounts.set(source, nextCount);
+    }
+    if (prevCount > 0 && nextCount === 0 && !staticSources.has(source)) {
+      querySourceIterator.removeSource(source);
+      logger.warn({ source, sourceHash: hashText(source), previousRefCount: prevCount, nextRefCount: nextCount, decrement: count, reason }, 'Dynamic source removed from query iterator');
+    }
+  }
+
+  function replaceEndpointSources(descriptor: { endpoint: string; variables: string[] }, sources: string[]): void {
+    const previousCounts = endpointSourceCounts.get(descriptor.endpoint) ?? new Map<string, number>();
+    const nextCounts = countSources(sources);
+    const allSources = new Set([ ...previousCounts.keys(), ...nextCounts.keys() ]);
+    const added: string[] = [];
+    const removed: string[] = [];
+    const changed: Array<{ source: string, previousCount: number, nextCount: number }> = [];
+
+    for (const source of allSources) {
+      const previousCount = previousCounts.get(source) ?? 0;
+      const nextCount = nextCounts.get(source) ?? 0;
+      if (nextCount > previousCount) {
+        added.push(source);
+        changed.push({ source, previousCount, nextCount });
+        incrementDynamicSourceReference(source, nextCount - previousCount);
+      } else if (previousCount > nextCount) {
+        removed.push(source);
+        changed.push({ source, previousCount, nextCount });
+        decrementDynamicSourceReference(source, previousCount - nextCount, 'sse-initial-snapshot-reconciliation');
+      }
+    }
+
+    endpointSourceCounts.set(descriptor.endpoint, nextCounts);
+    logger.info({
+      endpoint: descriptor.endpoint,
+      previousCount: [...previousCounts.values()].reduce((sum, count) => sum + count, 0),
+      nextCount: sources.length,
+      addedCount: added.length,
+      removedCount: removed.length,
+      added,
+      removed,
+      changed
+    }, 'Dynamic sources reconciled from SSE snapshot');
+  }
+
+  function addEndpointSource(descriptor: { endpoint: string; variables: string[] }, source: string, eventContext: any): void {
+    const endpointCounts = endpointSourceCounts.get(descriptor.endpoint) ?? new Map<string, number>();
+    endpointSourceCounts.set(descriptor.endpoint, endpointCounts);
+    const previousEndpointCount = endpointCounts.get(source) ?? 0;
+    endpointCounts.set(source, previousEndpointCount + 1);
+    incrementDynamicSourceReference(source);
+    logger.info({
+      ...eventContext,
+      source,
+      sourceHash: hashText(source),
+      previousEndpointCount,
+      nextEndpointCount: previousEndpointCount + 1,
+      previousGlobalRefCount: dynamicRefCounts.get(source) ?? 0
+    }, 'Dynamic source added via SSE update');
+  }
+
+  function removeEndpointSource(descriptor: { endpoint: string; variables: string[] }, source: string, eventContext: any): void {
+    const endpointCounts = endpointSourceCounts.get(descriptor.endpoint) ?? new Map<string, number>();
+    endpointSourceCounts.set(descriptor.endpoint, endpointCounts);
+    const previousCount = endpointCounts.get(source) ?? 0;
+    if (previousCount === 0) {
+      logger.warn({
+        ...eventContext,
+        source,
+        sourceHash: hashText(source),
+        endpoint: descriptor.endpoint
+      }, 'Ignoring dynamic source deletion that was not known for endpoint');
+      return;
+    }
+    if (previousCount <= 1) {
+      endpointCounts.delete(source);
+    } else {
+      endpointCounts.set(source, previousCount - 1);
+    }
+    logger.warn({
+      ...eventContext,
+      source,
+      sourceHash: hashText(source),
+      previousEndpointCount: previousCount,
+      nextEndpointCount: Math.max(0, previousCount - 1),
+      previousGlobalRefCount: dynamicRefCounts.get(source) ?? 0
+    }, 'Dynamic source deletion received from SSE update');
+    decrementDynamicSourceReference(source, 1, 'sse-update-deletion');
+  }
 
   for (const descriptor of dynamicEndpoints) {
     try {
@@ -888,6 +1035,8 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
       const decoder = new TextDecoder();
       let buffer = '';
       let isClosed = false;
+      let currentEvent: string | null = null;
+      let currentData: string | null = null;
 
       const processStream = async () => {
         try {
@@ -902,16 +1051,15 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
-            let currentEvent: string | null = null;
-            let currentData: string | null = null;
-
             for (const line of lines) {
               if (line.startsWith('event: ')) {
                 currentEvent = line.slice(7).trim();
               } else if (line.startsWith('data: ')) {
                 currentData = line.slice(6).trim();
-              } else if (line === '' && currentEvent && currentData) {
-                handleSSEEvent(descriptor, currentEvent, currentData);
+              } else if (line === '') {
+                if (currentEvent && currentData !== null) {
+                  handleSSEEvent(descriptor, currentEvent, currentData);
+                }
                 currentEvent = null;
                 currentData = null;
               }
@@ -926,24 +1074,48 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
 
       const handleSSEEvent = (descriptor: { endpoint: string; variables: string[] }, event: string, data: string) => {
         try {
-          if (event === 'initial' || event === 'processing' || event === 'up-to-date') {
+          if (event === 'processing' || event === 'up-to-date') {
             return;
           }
 
           const parsed = JSON.parse(data);
+          logger.info({
+            endpoint: descriptor.endpoint,
+            event,
+            dataHash: hashText(data),
+            dataLength: data.length,
+            additions: Array.isArray(parsed?.additions) ? parsed.additions.length : undefined,
+            deletions: Array.isArray(parsed?.deletions) ? parsed.deletions.length : undefined,
+            resultBindings: Array.isArray(parsed?.results?.bindings) ? parsed.results.bindings.length : undefined
+          }, 'SSE event received');
+
+          if (event === 'initial') {
+            const sources = collectSourcesFromSparqlJson(parsed, descriptor.variables);
+            logger.info({
+              endpoint: descriptor.endpoint,
+              event,
+              sources,
+              sourceHashes: sources.map(hashText)
+            }, 'SSE initial snapshot sources extracted');
+            replaceEndpointSources(descriptor, sources);
+            return;
+          }
 
           if (event === 'update') {
             // Handle additions
             if (parsed.additions && Array.isArray(parsed.additions)) {
               for (const binding of parsed.additions) {
                 const sources = collectSourcesFromBindingObject(binding, descriptor.variables);
+                logger.info({
+                  endpoint: descriptor.endpoint,
+                  event,
+                  action: 'addition',
+                  binding: summarizeBindingObject(binding),
+                  sources,
+                  sourceHashes: sources.map(hashText)
+                }, 'SSE update binding interpreted');
                 for (const source of sources) {
-                  const prevCount = dynamicRefCounts.get(source) ?? 0;
-                  dynamicRefCounts.set(source, prevCount + 1);
-                  if (prevCount === 0 && !staticSources.has(source)) {
-                    querySourceIterator.addSource(source);
-                    logger.debug({ source, endpoint: descriptor.endpoint }, 'Dynamic source added via SSE');
-                  }
+                  addEndpointSource(descriptor, source, { endpoint: descriptor.endpoint, event, action: 'addition' });
                 }
               }
             }
@@ -952,20 +1124,22 @@ async function getSources(sourceTerms: any[]): Promise<QuerySourceIterator> {
             if (parsed.deletions && Array.isArray(parsed.deletions)) {
               for (const binding of parsed.deletions) {
                 const sources = collectSourcesFromBindingObject(binding, descriptor.variables);
+                logger.warn({
+                  endpoint: descriptor.endpoint,
+                  event,
+                  action: 'deletion',
+                  binding: summarizeBindingObject(binding),
+                  sources,
+                  sourceHashes: sources.map(hashText)
+                }, 'SSE update binding interpreted');
                 for (const source of sources) {
-                  const prevCount = dynamicRefCounts.get(source) ?? 0;
-                  const nextCount = Math.max(0, prevCount - 1);
-                  dynamicRefCounts.set(source, nextCount);
-                  if (nextCount === 0 && !staticSources.has(source)) {
-                    querySourceIterator.removeSource(source);
-                    logger.debug({ source, endpoint: descriptor.endpoint }, 'Dynamic source removed via SSE');
-                  }
+                  removeEndpointSource(descriptor, source, { endpoint: descriptor.endpoint, event, action: 'deletion' });
                 }
               }
             }
           }
         } catch (e) {
-          logger.error({ endpoint: descriptor.endpoint, error: e }, 'Error handling SSE event');
+          logger.error({ endpoint: descriptor.endpoint, error: serializeError(e), event, dataHash: hashText(data), dataLength: data.length }, 'Error handling SSE event');
         }
       };
 
@@ -1117,7 +1291,7 @@ async function evaluateSparqlEvaluationPipelineOnce(
     // @ts-ignore
     sources: [sourceIterator],
     fetch: customFetch,
-    deferredEvaluationTrigger,
+    deferredEvaluationTrigger: new EventEmitter(),
   });
 
   const view = new Map<string, { bindings: any, count: number }>();
@@ -1191,6 +1365,24 @@ function collectSourcesFromBindingObject(bindingObject: any, variables: string[]
   }
 
   return sourceValues;
+}
+
+function collectSourcesFromSparqlJson(json: any, variables: string[]): string[] {
+  const endpointSources: string[] = [];
+  if (json?.results?.bindings && Array.isArray(json.results.bindings)) {
+    json.results.bindings.forEach((binding: any) => {
+      endpointSources.push(...collectSourcesFromBindingObject(binding, variables));
+    });
+  }
+  return endpointSources;
+}
+
+function countSources(sources: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const source of sources) {
+    counts.set(source, (counts.get(source) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function materializedViewToSparqlJson(materializedView: Map<string,{bindings: any, count: number}>) {
