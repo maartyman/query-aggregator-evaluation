@@ -7,6 +7,7 @@ import { ClaimSet } from '../ClaimSet';
 import { Credential } from '../Credential';
 import { OIDC } from '../Formats';
 import { Verifier } from './Verifier';
+import './allowHttpOidcUriClaims';
 
 /**
  * A Verifier for OIDC ID Tokens.
