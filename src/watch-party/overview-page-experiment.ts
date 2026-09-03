@@ -9,6 +9,7 @@ import {ExperimentResult} from "../utils/result-builder";
 import {
   configureAggregatorProxy,
   createAggregatorService,
+  getAggregatorUrl,
   getAggregatorServiceWithTimings,
   getDiscoveredAggregatorServiceWithTimings,
   waitForAggregatorService
@@ -19,6 +20,7 @@ import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
+import {SolutionTimeoutTracker} from "../utils/solution-timeout";
 
 const queryMessageLocations = `PREFIX ldp: <http://www.w3.org/ns/ldp#>
 SELECT ?messageLocations WHERE {
@@ -191,6 +193,7 @@ async function runQueriesInWorker(
 export class OverviewPageExperiment extends WatchpartyDataGenerator implements Experiment {
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -198,42 +201,26 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
           for (const cache of ["no-cache", "indexed-cache"] as const) {
+            const solutionKey = podContext.name + "_" + cache;
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await new Promise<ExperimentResult>((resolve, reject) => {
-              const logLevel = Logger.getLevel()
-              const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext, cache, authorizationMode: this.experimentConfig.authorizationMode}
-              });
-
-              worker.on('message', (message) => {
-                if (message.success) {
-                  const experimentResult = ExperimentResult.deserialize(message.result);
-                  results.push(experimentResult);
-                  resolve(experimentResult);
-                } else {
-                  reject(new Error(message.error));
-                }
-                worker.terminate();
-              });
-
-              worker.on('error', (error) => {
-                console.error(`Worker error for ${podContext.name}:`, error);
-                reject(error);
-              });
-
-              worker.on('exit', (code) => {
-                if (code !== 0) {
-                  //console.error(`Worker stopped with exit code ${code}`);
-                }
-              });
+            const logLevel = Logger.getLevel();
+            const worker = new Worker(__filename, {
+              workerData: {logLevel, podContext, cache, authorizationMode: this.experimentConfig.authorizationMode}
             });
+            const result = await tracker.runWorkerSolution(solutionKey, worker);
+            if (result) {
+              results.push(result);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
@@ -246,16 +233,21 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
 
   private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
         for (const arg of iterationConfig.args) {
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
-          const podContext = this.getPodContextByName(podName);
+          const podContext = this.resolveAggregatorPodContext(podName);
           const messageContainer = `${podContext.baseUrl}/watchparties/myMessages/`;
           const expectedResults = arg[0] * 2;
 
           for (const cache of ["no-cache"]) {
+            const solutionKey = podContext.name + (discover ? "_aggregator_discovered" : "_aggregator");
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${podName}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext, messageContainer, arg[0], expectedResults);
 
@@ -266,27 +258,31 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
             await auth?.getAccessToken();
             const serviceClient = auth ?? createMeasuredFetch();
 
-            const setupHttpMetrics = await getHttpMetricsSnapshot();
-            const startTime = ExperimentResult.startMeasurement();
-            const timedAggregatorResult = discover
-              ? await getDiscoveredAggregatorServiceWithTimings(serviceClient, [ messageContainer ], queryRooms)
-              : await getAggregatorServiceWithTimings(serviceClient, this.aggregatorIdStore.get(podContext.name)!);
+            const aggregatorResult = await tracker.runSolution(solutionKey, async () => {
+              const setupHttpMetrics = await getHttpMetricsSnapshot();
+              const startTime = ExperimentResult.startMeasurement();
+              const timedAggregatorResult = discover
+                ? await getDiscoveredAggregatorServiceWithTimings(serviceClient, [ messageContainer ], queryRooms)
+                : await getAggregatorServiceWithTimings(serviceClient, this.aggregatorIdStore.get(podContext.name)!);
 
-            const aggregatorResult = await ExperimentResult.fromJson(
-              podContext.name + (discover ? "_aggregator_discovered" : "_aggregator"),
-              startTime,
-              timedAggregatorResult.json,
-              { setupHttpMetrics, ...(timedAggregatorResult.metrics ?? {}) },
-              timedAggregatorResult.phaseTimings
-            );
-            results.push(aggregatorResult);
+              return await ExperimentResult.fromJson(
+                solutionKey,
+                startTime,
+                timedAggregatorResult.json,
+                { setupHttpMetrics, ...(timedAggregatorResult.metrics ?? {}) },
+                timedAggregatorResult.phaseTimings
+              );
+            });
+            if (aggregatorResult) {
+              results.push(aggregatorResult);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 
   private async setupAggregator(
@@ -304,6 +300,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     if (this.aggregatorIdStore.has(podContext.name)) {
       return;
     }
+    const aggregatorUrl = getAggregatorUrl();
 
     // start first aggregator with message locations query
     const messageLocationsId = await createAggregatorService(auth, fnoConfMessageLocations.replace(
@@ -315,7 +312,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     // start second aggregator with message boxes query passing in the result of the first
     const messageBoxesId = await createAggregatorService(auth, fnoConfMessageBoxes.replace(
       "$MessageLocationsQueryResultLocation$",
-      `http://localhost:5000/${messageLocationsId}/`
+      `${aggregatorUrl}${messageLocationsId}/`
     ).replace(
       "$MessageContainer$",
       messageContainer
@@ -325,7 +322,7 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     // start third aggregator with rooms query passing in the result of the second
     const roomsId = await createAggregatorService(auth, fnoConfRooms.replace(
       "$MessageBoxesQueryResultLocation$",
-      `http://localhost:5000/${messageBoxesId}/`
+      `${aggregatorUrl}${messageBoxesId}/`
     ).replace(
       "$MessageContainer$",
       messageContainer

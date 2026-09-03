@@ -13,6 +13,7 @@ import {CachingStrategy} from "../utils/caching-strategy";
 import {AsyncIterator} from "asynciterator";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
+import {SolutionTimeoutTracker} from "../utils/solution-timeout";
 
 const aggregatorFromServiceRel = "https://w3id.org/aggregator#fromService";
 
@@ -327,6 +328,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -346,42 +348,26 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
           for (const cache of ["no-cache", "indexed-cache"] as const) {
+            const solutionKey = this.podContext.name + "_" + selectedColumns + "_" + cache;
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running local experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await new Promise<ExperimentResult>((resolve, reject) => {
-              const logLevel = Logger.getLevel()
-              const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache, authorizationMode: this.experimentConfig.authorizationMode}
-              });
-
-              worker.on('message', (message) => {
-                if (message.success) {
-                  const experimentResult = ExperimentResult.deserialize(message.result);
-                  results.push(experimentResult);
-                  resolve(experimentResult);
-                } else {
-                  reject(new Error(message.error));
-                }
-                worker.terminate();
-              });
-
-              worker.on('error', (error) => {
-                console.error(`Worker error for ${this.podContext!.name}:`, error);
-                reject(error);
-              });
-
-              worker.on('exit', (code) => {
-                if (code !== 0) {
-                  // Worker stopped with non-zero exit code
-                }
-              });
+            const logLevel = Logger.getLevel();
+            const worker = new Worker(__filename, {
+              workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache, authorizationMode: this.experimentConfig.authorizationMode}
             });
+            const result = await tracker.runWorkerSolution(solutionKey, worker);
+            if (result) {
+              results.push(result);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
@@ -394,6 +380,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
   private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -410,9 +397,13 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             activityLocations.push(`activity-${i}`);
           }
 
-          this.podContext = this.getUserPodContext(this.queryUser, experimentId);
+          this.podContext = this.getAggregatorUserPodContext(this.queryUser, experimentId);
 
           for (const cache of ["no-cache"]) {
+            const solutionKey = this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator");
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
@@ -420,91 +411,96 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             await auth.init();
             await auth.getAccessToken();
 
-            resetHttpMetrics();
-            const setupHttpMetrics = await getHttpMetricsSnapshot();
-            const startTime = ExperimentResult.startMeasurement();
+            const podContext = this.podContext;
+            const aggregatorResult = await tracker.runSolution(solutionKey, async () => {
+              resetHttpMetrics();
+              const setupHttpMetrics = await getHttpMetricsSnapshot();
+              const startTime = ExperimentResult.startMeasurement();
 
-            const activitySources = activityLocations.map(location =>
-              `${this.podContext!.baseUrl}/activities/${location}`
-            );
+              const activitySources = activityLocations.map(location =>
+                `${podContext.baseUrl}/activities/${location}`
+              );
 
-            const columnConfig = SelectedColumnsMap[selectedColumns];
-            if (!columnConfig) {
-              throw new Error(`Unknown selected columns config: ${selectedColumns}`);
-            }
-
-            const activityDao = new ActivityDao();
-            const phaseTimings: PhaseTiming[] = [];
-            const serviceAlternativeCounts: number[] = [];
-            await activityDao.count({
-              sources: activitySources,
-              aggregator: {
-                enabled: true,
-                podContext: this.podContext,
-                enableCache: false,
-                discover,
-                expectedBindings: 1,
-                phaseTimings,
-                serviceAlternativeCounts
-              },
-              auth
-            });
-
-            const activities = await activityDao.find({
-              sources: activitySources,
-              keys: columnConfig.keys,
-              filterKeys: columnConfig.filterKeys,
-              ...(columnConfig.sort && { sort: columnConfig.sort }),
-              aggregator: {
-                enabled: true,
-                podContext: this.podContext,
-                enableCache: false,
-                discover,
-                expectedBindings: numberOfActivities,
-                phaseTimings,
-                serviceAlternativeCounts
-              },
-              auth
-            });
-
-            const aggregatorResultJson = {
-              results: {
-                bindings: Array.isArray(activities)
-                  ? activities.map((activity: any) => {
-                    const binding: any = {};
-                    for (const [key, value] of Object.entries(activity)) {
-                      if (value !== null && value !== undefined) {
-                        binding[key] = {
-                          type: 'literal',
-                          value: typeof value === 'object' ? JSON.stringify(value) : String(value)
-                        };
-                      }
-                    }
-                    return binding;
-                  })
-                  : []
+              const columnConfig = SelectedColumnsMap[selectedColumns];
+              if (!columnConfig) {
+                throw new Error(`Unknown selected columns config: ${selectedColumns}`);
               }
-            };
 
-            const aggregatorResult = await ExperimentResult.fromJson(
-              this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator"),
-              startTime,
-              aggregatorResultJson,
-              {
-                setupHttpMetrics,
-                serviceAlternatives: serviceAlternativeCounts.length > 0 ? Math.max(...serviceAlternativeCounts) : 0,
-                serviceAlternativeCounts,
-              },
-              phaseTimings
-            );
-            results.push(aggregatorResult);
+              const activityDao = new ActivityDao();
+              const phaseTimings: PhaseTiming[] = [];
+              const serviceAlternativeCounts: number[] = [];
+              await activityDao.count({
+                sources: activitySources,
+                aggregator: {
+                  enabled: true,
+                  podContext: podContext,
+                  enableCache: false,
+                  discover,
+                  expectedBindings: 1,
+                  phaseTimings,
+                  serviceAlternativeCounts
+                },
+                auth
+              });
+
+              const activities = await activityDao.find({
+                sources: activitySources,
+                keys: columnConfig.keys,
+                filterKeys: columnConfig.filterKeys,
+                ...(columnConfig.sort && { sort: columnConfig.sort }),
+                aggregator: {
+                  enabled: true,
+                  podContext: podContext,
+                  enableCache: false,
+                  discover,
+                  expectedBindings: numberOfActivities,
+                  phaseTimings,
+                  serviceAlternativeCounts
+                },
+                auth
+              });
+
+              const aggregatorResultJson = {
+                results: {
+                  bindings: Array.isArray(activities)
+                    ? activities.map((activity: any) => {
+                      const binding: any = {};
+                      for (const [key, value] of Object.entries(activity)) {
+                        if (value !== null && value !== undefined) {
+                          binding[key] = {
+                            type: 'literal',
+                            value: typeof value === 'object' ? JSON.stringify(value) : String(value)
+                          };
+                        }
+                      }
+                      return binding;
+                    })
+                    : []
+                }
+              };
+
+              return await ExperimentResult.fromJson(
+                solutionKey,
+                startTime,
+                aggregatorResultJson,
+                {
+                  setupHttpMetrics,
+                  serviceAlternatives: serviceAlternativeCounts.length > 0 ? Math.max(...serviceAlternativeCounts) : 0,
+                  serviceAlternativeCounts,
+                },
+                phaseTimings
+              );
+            });
+            if (aggregatorResult) {
+              results.push(aggregatorResult);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 }
 

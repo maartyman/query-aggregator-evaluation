@@ -68,6 +68,19 @@ function parseNonNegativeInteger(value: unknown): number | undefined {
   return undefined;
 }
 
+function getEnvValue(name: string, fallback: string): string {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : fallback;
+}
+
+function getBooleanEnvValue(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (value === undefined || value.length === 0) {
+    return fallback;
+  }
+  return ["1", "true", "yes", "on"].includes(value);
+}
+
 export class DataGenerator {
   protected readonly experimentConfig: any;
   protected readonly outputDirectory: string;
@@ -76,6 +89,10 @@ export class DataGenerator {
   private readonly podsPerServer: number;
   private readonly solidPortBase: number;
   private readonly umaPortBase: number;
+
+  protected readonly dedicatedAggregatorStack: boolean;
+  private readonly aggregatorSolidPortBase: number;
+  private readonly aggregatorUmaPortBase: number;
 
   private readonly podContexts = new Map<string, PodContext>();
   private readonly servers = new Map<number, ServerInstanceContext>();
@@ -100,6 +117,12 @@ export class DataGenerator {
     const configUmaPortBase = parseNonNegativeInteger(experimentConfig?.umaPortBase);
     const rawUmaPortBase = options.umaPortBase ?? envUmaPortBase ?? configUmaPortBase;
     this.umaPortBase = rawUmaPortBase ?? 4000;
+
+    this.dedicatedAggregatorStack = getBooleanEnvValue("AGGREGATOR_DEDICATED_STACK", true);
+    this.aggregatorSolidPortBase =
+      parseNonNegativeInteger(process.env.AGGREGATOR_SOLID_PORT_BASE) ?? 8000;
+    this.aggregatorUmaPortBase =
+      parseNonNegativeInteger(process.env.AGGREGATOR_UMA_PORT_BASE) ?? 7000;
   }
 
   protected removeGeneratedData(): void {
@@ -165,6 +188,73 @@ export class DataGenerator {
     return context;
   }
 
+  /**
+   * Directory holding the mirrored copy of the generated data that is served by the
+   * dedicated aggregator CSS/UMA stack.
+   */
+  public getAggregatorDataDirectory(): string {
+    return `${this.outputDirectory}-aggregator`;
+  }
+
+  /**
+   * Build the aggregator-stack counterpart of a primary server: same index and data layout,
+   * but hosted on the aggregator CSS/UMA ports/hosts.
+   */
+  public getAggregatorServerContext(server: ServerInstanceContext): ServerInstanceContext {
+    const solidPort = this.aggregatorSolidPortBase + server.index;
+    const umaPort = this.aggregatorUmaPortBase + server.index;
+    const solidProtocol = getEnvValue("AGGREGATOR_SOLID_PROTOCOL", getEnvValue("SOLID_PROTOCOL", "http"));
+    const umaProtocol = getEnvValue("AGGREGATOR_UMA_PROTOCOL", getEnvValue("UMA_PROTOCOL", "http"));
+    const solidHost = getEnvValue("AGGREGATOR_SOLID_HOST", getEnvValue("SOLID_HOST", "localhost"));
+    const umaHost = getEnvValue("AGGREGATOR_UMA_HOST", getEnvValue("UMA_HOST", "localhost"));
+    return {
+      index: server.index,
+      solidPort,
+      umaPort,
+      relativePath: server.relativePath,
+      absolutePath: path.join(this.getAggregatorDataDirectory(), server.relativePath),
+      solidBaseUrl: `${solidProtocol}://${solidHost}:${solidPort}/`,
+      umaBaseUrl: `${umaProtocol}://${umaHost}:${umaPort}/uma`,
+    };
+  }
+
+  public getAggregatorServers(): ServerInstanceContext[] {
+    return this.getServers().map(server => this.getAggregatorServerContext(server));
+  }
+
+  /**
+   * Aggregator-stack counterpart of a primary pod context. The pod name and email stay
+   * identical (same account on the mirrored data); only the hosting server/URLs change.
+   */
+  public getAggregatorPodContext(podName: string): PodContext {
+    const primary = this.getPodContextByName(podName);
+    const aggregatorServer = this.getAggregatorServerContext(primary.server);
+    const baseUrl = `${aggregatorServer.solidBaseUrl}${podName}`;
+    return {
+      name: podName,
+      relativePath: primary.relativePath,
+      absolutePath: path.join(aggregatorServer.absolutePath, podName),
+      baseUrl,
+      webId: `${baseUrl}/profile/card#me`,
+      email: primary.email,
+      server: aggregatorServer,
+    };
+  }
+
+  /**
+   * Pod context to use for aggregator execution: the dedicated aggregator stack when
+   * enabled, otherwise the shared primary stack (legacy behaviour).
+   */
+  public resolveAggregatorPodContext(podName: string): PodContext {
+    return this.dedicatedAggregatorStack
+      ? this.getAggregatorPodContext(podName)
+      : this.getPodContextByName(podName);
+  }
+
+  public isDedicatedAggregatorStackEnabled(): boolean {
+    return this.dedicatedAggregatorStack;
+  }
+
   protected finalizeGeneration(queryUser: PodContext, queryUsers: PodContext[] = [ queryUser ]): ExperimentSetup {
     for (const server of this.getServers()) {
       this.generateServerMetadata(server);
@@ -193,8 +283,8 @@ export class DataGenerator {
       umaPort,
       relativePath,
       absolutePath,
-      solidBaseUrl: `http://localhost:${solidPort}/`,
-      umaBaseUrl: `http://localhost:${umaPort}/uma`
+      solidBaseUrl: `${getEnvValue("SOLID_PROTOCOL", "http")}://${getEnvValue("SOLID_HOST", "localhost")}:${solidPort}/`,
+      umaBaseUrl: `${getEnvValue("UMA_PROTOCOL", "http")}://${getEnvValue("UMA_HOST", "localhost")}:${umaPort}/uma`
     };
 
     this.servers.set(index, context);

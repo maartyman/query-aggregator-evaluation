@@ -86,6 +86,10 @@ export class ElevateDataGenerator extends DataGenerator {
     return this.getOrCreatePodContext(this.getPodName(user, experimentId));
   }
 
+  protected getAggregatorUserPodContext(user: string, experimentId: string): PodContext {
+    return this.resolveAggregatorPodContext(this.getPodName(user, experimentId));
+  }
+
   protected getUserPodRelativePath(user: string, experimentId: string) {
     return this.getUserPodContext(user, experimentId).relativePath;
   }

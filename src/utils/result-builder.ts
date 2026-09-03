@@ -20,6 +20,7 @@ export class ExperimentResult {
   public totalResults: number;
   public phaseTimings: PhaseTiming[];
   public parameters?: Record<string, any>;
+  public timedOut: boolean;
 
   constructor(
     experimentId: string,
@@ -32,7 +33,8 @@ export class ExperimentResult {
     timestamps: [number, number][],
     totalResults: number,
     phaseTimings: PhaseTiming[] = [],
-    parameters?: Record<string, any>
+    parameters?: Record<string, any>,
+    timedOut: boolean = false
   ) {
     this.experimentId = experimentId;
     this.totalDuration = totalDuration;
@@ -45,6 +47,28 @@ export class ExperimentResult {
     this.totalResults = totalResults;
     this.phaseTimings = phaseTimings;
     this.parameters = parameters;
+    this.timedOut = timedOut;
+  }
+
+  /**
+   * Create a marker result representing a solution that exceeded the allowed timeout.
+   * The whole solution is considered failed, so no measured timing data is kept.
+   */
+  public static timedOut(experimentId: string, timeoutMs: number): ExperimentResult {
+    return new ExperimentResult(
+      experimentId,
+      timeoutMs,
+      0,
+      0,
+      0,
+      0,
+      0,
+      [],
+      0,
+      [],
+      { timedOut: true, timeoutMs },
+      true
+    );
   }
 
   /**
@@ -67,7 +91,8 @@ export class ExperimentResult {
       obj.timestamps,
       obj.totalResults,
       obj.phaseTimings ?? [],
-      obj.parameters
+      obj.parameters,
+      obj.timedOut ?? false
     );
   }
 

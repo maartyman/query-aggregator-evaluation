@@ -1,7 +1,14 @@
 import {Auth} from "./auth";
 import {ExperimentResult, type PhaseTiming} from "./result-builder";
-const aggregatorUrl = "http://localhost:5000/";
-const aggregatorUmaIssuer = "http://localhost:4000/uma";
+
+function normalizeBaseUrl(value: string, trailingSlash = true): string {
+  const trimmed = value.trim();
+  if (trailingSlash) {
+    return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+  }
+  return trimmed.replace(/\/$/u, "");
+}
+
 const aggregatorFromServiceRel = "https://w3id.org/aggregator#fromService";
 const aggregatorReadinessMsPerExpectedBinding = readPositiveIntegerEnv(
   "AGGREGATOR_READINESS_MS_PER_BINDING",
@@ -38,6 +45,14 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function getAggregatorUrl(): string {
+  return normalizeBaseUrl(process.env.AGGREGATOR_BASE_URL ?? "http://localhost:5000/");
+}
+
+function getAggregatorUmaIssuer(): string {
+  return normalizeBaseUrl(process.env.AGGREGATOR_UMA_ISSUER ?? "http://localhost:4000/uma", false);
 }
 
 function appendPhase(
@@ -91,6 +106,7 @@ async function fetchAggregatorJsonWithTimings(
 }
 
 export async function createAggregatorService(auth: Auth, FnoDescription: string): Promise<string> {
+  const aggregatorUrl = getAggregatorUrl();
   const response = await auth.fetch(`${aggregatorUrl}config/actors`, {
     method: "POST",
     headers: {
@@ -106,11 +122,12 @@ export async function createAggregatorService(auth: Auth, FnoDescription: string
     `${aggregatorUrl}${id}`,
     `${aggregatorUrl}${id}/`,
     `${aggregatorUrl}config/actors/${id}`,
-  ], aggregatorUmaIssuer);
+  ], getAggregatorUmaIssuer());
   return id;
 }
 
 export async function configureAggregatorProxy(auth: Auth): Promise<void> {
+  const aggregatorUrl = getAggregatorUrl();
   const response = await auth.fetch(`${aggregatorUrl}config/proxy`, {
     method: "POST",
     headers: {
@@ -131,6 +148,7 @@ export async function configureAggregatorProxy(auth: Auth): Promise<void> {
 }
 
 export async function registerAggregatorServiceDescription(auth: Auth, FnoDescription: string): Promise<string> {
+  const aggregatorUrl = getAggregatorUrl();
   const response = await auth.fetch(`${aggregatorUrl}config/actors?descriptionOnly=true`, {
     method: "POST",
     headers: {
@@ -149,6 +167,7 @@ export async function getAggregatorService(client: FetchClient, serviceId: strin
 }
 
 export async function getAggregatorServiceWithTimings(client: FetchClient, serviceId: string): Promise<TimedAggregatorResult> {
+  const aggregatorUrl = getAggregatorUrl();
   const phaseTimings: PhaseTiming[] = [];
   const { json } = await fetchAggregatorJsonWithTimings(
     client,

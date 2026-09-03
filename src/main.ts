@@ -1,4 +1,13 @@
-import {type AuthorizationMode, createServerLogSink, type ServerLogSink, startServers, stopServers} from "./utils/server-functions";
+import {
+  type AuthorizationMode,
+  type AggregatorStackConfig,
+  configureDistributedServers,
+  createServerLogSink,
+  type DistributedServerConfig,
+  type ServerLogSink,
+  startServers,
+  stopServers
+} from "./utils/server-functions";
 import * as path from 'path';
 import * as fs from 'fs';
 import type {Experiment} from "./experiment";
@@ -11,6 +20,7 @@ import {ActivityPageExperiment} from "./elevate/activity-page-experiment";
 import {getAggregatorIdStore} from "./utils/aggregator-id-store";
 import {ActivitiesPageExperiment} from "./elevate/activities-page-experiment";
 import {ExperimentResult} from "./utils/result-builder";
+import {mirrorExperimentData} from "./utils/data-mirror";
 
 process.stdin.resume();
 
@@ -55,6 +65,7 @@ export interface Config {
   useExistingData?: boolean;
   experimentDataRoot?: string;
   resourceRegistrationAuthorizedWebId?: string;
+  distributed?: DistributedServerConfig;
   experiments: Record<string, ExperimentConfig>;
 }
 
@@ -202,6 +213,37 @@ function getIterationMetadata(
   return null;
 }
 
+function formatIterationArgs(args: any[]): string {
+  return args.map(value => String(value)).join("_");
+}
+
+function splitExperimentConfigByArgument(experimentConfig: ExperimentConfig): Array<{
+  label: string;
+  config: ExperimentConfig;
+}> {
+  const configs: Array<{ label: string; config: ExperimentConfig }> = [];
+
+  for (const iterationConfig of experimentConfig.iterations) {
+    for (const args of iterationConfig.args) {
+      const iterationArgs = formatIterationArgs(args);
+      configs.push({
+        label: `${iterationConfig.iterationName}-${iterationArgs}`,
+        config: {
+          ...experimentConfig,
+          iterations: [
+            {
+              iterationName: iterationConfig.iterationName,
+              args: [args],
+            },
+          ],
+        },
+      });
+    }
+  }
+
+  return configs;
+}
+
 async function runExperiment(
   experimentName: string,
   experimentConfig: ExperimentConfig,
@@ -262,6 +304,31 @@ async function runExperiment(
     setup = experiment.generate();
   }
 
+  let aggregatorStack: AggregatorStackConfig | undefined;
+  const generator = experiment as any;
+  if (generator.isDedicatedAggregatorStackEnabled && generator.isDedicatedAggregatorStackEnabled()) {
+    const aggregatorDataLocation = generator.getAggregatorDataDirectory();
+    const aggregatorServers = generator.getAggregatorServers();
+    const aggregatorQueryUser = generator.getAggregatorPodContext(setup.queryUser.name);
+    const aggregatorAuthorizedWebIds = setup.queryUsers
+      .map(user => generator.getAggregatorPodContext(user.name).webId)
+      .join(",");
+    
+    await mirrorExperimentData(
+      experimentLocation,
+      aggregatorDataLocation,
+      setup.servers,
+      aggregatorServers
+    );
+
+    aggregatorStack = {
+      servers: aggregatorServers,
+      dataLocation: aggregatorDataLocation,
+      queryUser: aggregatorQueryUser,
+      resourceRegistrationAuthorizedWebId: aggregatorAuthorizedWebIds
+    };
+  }
+
   try {
     await startServers(
       path.resolve("./user-managed-access/packages/uma"),
@@ -273,7 +340,8 @@ async function runExperiment(
       setup.queryUser,
       loggingOptions,
       resourceRegistrationAuthorizedWebId?.trim() || setup.queryUsers.map(user => user.webId).join(","),
-      logSink
+      logSink,
+      aggregatorStack
     );
 
     getAggregatorIdStore().clear();
@@ -424,6 +492,7 @@ async function main() {
 
   const configContent = fs.readFileSync(configPath, 'utf-8');
   const config: Config = JSON.parse(configContent);
+  configureDistributedServers(config.distributed);
 
   const resultsDir = path.resolve('./results');
   fs.mkdirSync(resultsDir, { recursive: true });
@@ -459,87 +528,95 @@ async function main() {
 
     const includeAuthorizationModeSuffix = authorizationModes.length > 1;
 
+    const argumentConfigs = splitExperimentConfigByArgument(configWithPods);
+
     for (const authorizationMode of authorizationModes) {
       const suffix = includeAuthorizationModeSuffix ? `-${authorizationMode}` : '';
 
-      const fullExperimentName = `${experimentName}${suffix}`;
+      for (const {label: iterationLabel, config: singleArgumentConfig} of argumentConfigs) {
+        const fullExperimentName = `${experimentName}-${iterationLabel}${suffix}`;
 
-      console.log(`Running ${fullExperimentName} (authorizationMode: ${authorizationMode})...`);
+        console.log(`Running ${fullExperimentName} (authorizationMode: ${authorizationMode})...`);
 
-      try {
-        const results = await runExperimentWithRetries(
-          fullExperimentName,
-          experimentName,
-          configWithPods,
-          config.useExistingData ?? false,
-          authorizationMode,
-          loggingOptions,
-          resourceRegistrationAuthorizedWebId,
-          experimentDataRoot,
-          logDirectory
-        );
+        try {
+          const results = await runExperimentWithRetries(
+            fullExperimentName,
+            experimentName,
+            singleArgumentConfig,
+            config.useExistingData ?? false,
+            authorizationMode,
+            loggingOptions,
+            resourceRegistrationAuthorizedWebId,
+            experimentDataRoot,
+            logDirectory
+          );
 
-        const resultRunCounts = new Map<string, number>();
+          const resultRunCounts = new Map<string, number>();
 
-        for (const result of results) {
-          try {
-            if (!result.parameters) {
-              result.parameters = {};
-            }
-
-            result.parameters.experimentName = experimentName;
-            result.parameters.experimentType = experimentConfig.type;
-            result.parameters.authorizationMode = authorizationMode;
-            result.parameters.delegatedAuth = authorizationMode === "delegated";
-            result.parameters.podsPerServer = podsPerServer;
-            result.parameters.useExistingData = config.useExistingData ?? false;
-            result.parameters.warmupRuns = WARMUP_RUNS;
-            result.parameters.recordedRuns = RECORDED_RUNS;
-
-            const idParts = result.experimentId.split('_');
-            const iterationMetadata = getIterationMetadata(result.experimentId, experimentConfig);
-
-            if (iterationMetadata) {
-              result.parameters.iterationName = iterationMetadata.iterationName;
-              result.parameters.iterationArgs = iterationMetadata.iterationArgs;
-            }
-
-            if (idParts.includes('aggregator')) {
-              result.parameters.useAggregator = true;
-              const aggregatorIndex = idParts.indexOf('aggregator');
-              const discovered = idParts[aggregatorIndex + 1] === 'discovered';
-              result.parameters.executionType = discovered ? 'aggregator-discovered' : 'aggregator';
-              const cacheIndex = aggregatorIndex + (discovered ? 2 : 1);
-              if (cacheIndex < idParts.length) {
-                result.parameters.cacheStrategy = idParts[cacheIndex];
+          for (const result of results) {
+            try {
+              if (!result.parameters) {
+                result.parameters = {};
               }
-            } else {
-              result.parameters.useAggregator = false;
-              result.parameters.executionType = idParts[idParts.length - 1] === 'indexed-cache' ? 'local-indexed-cache' : 'local';
-              if (idParts.length > 0) {
-                result.parameters.cacheStrategy = idParts[idParts.length - 1];
+
+              result.parameters.experimentName = experimentName;
+              result.parameters.experimentType = experimentConfig.type;
+              result.parameters.authorizationMode = authorizationMode;
+              result.parameters.delegatedAuth = authorizationMode === "delegated";
+              result.parameters.podsPerServer = podsPerServer;
+              result.parameters.useExistingData = config.useExistingData ?? false;
+              result.parameters.warmupRuns = WARMUP_RUNS;
+              result.parameters.recordedRuns = RECORDED_RUNS;
+
+              const idParts = result.experimentId.split('_');
+              const iterationMetadata = getIterationMetadata(result.experimentId, experimentConfig);
+
+              if (iterationMetadata) {
+                result.parameters.iterationName = iterationMetadata.iterationName;
+                result.parameters.iterationArgs = iterationMetadata.iterationArgs;
               }
+
+              if (idParts.includes('aggregator')) {
+                result.parameters.useAggregator = true;
+                const aggregatorIndex = idParts.indexOf('aggregator');
+                const discovered = idParts[aggregatorIndex + 1] === 'discovered';
+                result.parameters.executionType = discovered ? 'aggregator-discovered' : 'aggregator';
+                const cacheIndex = aggregatorIndex + (discovered ? 2 : 1);
+                if (cacheIndex < idParts.length) {
+                  result.parameters.cacheStrategy = idParts[cacheIndex];
+                }
+              } else {
+                result.parameters.useAggregator = false;
+                result.parameters.executionType = idParts[idParts.length - 1] === 'indexed-cache' ? 'local-indexed-cache' : 'local';
+                if (idParts.length > 0) {
+                  result.parameters.cacheStrategy = idParts[idParts.length - 1];
+                }
+              }
+
+              const runIndex = (resultRunCounts.get(result.experimentId) ?? 0) + 1;
+              resultRunCounts.set(result.experimentId, runIndex);
+              result.parameters.measurementRun = runIndex;
+
+              const runLabel = String(runIndex).padStart(String(RECORDED_RUNS).length, '0');
+              const resultFileName = `${result.experimentId}_run-${runLabel}${suffix}.json`;
+              const resultPath = path.join(resultsDir, resultFileName);
+              result.save(resultPath);
+
+              if (result.timedOut) {
+                console.warn(`⏱ Solution ${result.experimentId} timed out; recorded as failed.`);
+              }
+            } catch (saveError) {
+              console.error(`✗ Failed to save result for ${result.experimentId}:`, saveError);
             }
-
-            const runIndex = (resultRunCounts.get(result.experimentId) ?? 0) + 1;
-            resultRunCounts.set(result.experimentId, runIndex);
-            result.parameters.measurementRun = runIndex;
-
-            const runLabel = String(runIndex).padStart(String(RECORDED_RUNS).length, '0');
-            const resultFileName = `${result.experimentId}_run-${runLabel}${suffix}.json`;
-            const resultPath = path.join(resultsDir, resultFileName);
-            result.save(resultPath);
-          } catch (saveError) {
-            console.error(`✗ Failed to save result for ${result.experimentId}:`, saveError);
           }
-        }
 
-        successfulExperiments.push(fullExperimentName);
-        console.log(`✓ Completed ${fullExperimentName}`);
-      } catch (error) {
-        failedExperiments.push({name: fullExperimentName, error});
-        console.error(`✗ Failed ${fullExperimentName}:`, error);
-        console.log(`Continuing with next experiment...\n`);
+          successfulExperiments.push(fullExperimentName);
+          console.log(`✓ Completed ${fullExperimentName}`);
+        } catch (error) {
+          failedExperiments.push({name: fullExperimentName, error});
+          console.error(`✗ Failed ${fullExperimentName}:`, error);
+          console.log(`Continuing with next experiment...\n`);
+        }
       }
     }
   }
