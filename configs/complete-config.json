@@ -1,7 +1,26 @@
 {
-  "podsPerServer": 30,
+  "podsPerServer": 10,
   "useExistingData": false,
-  "resourceRegistrationAuthorizedWebId": "",
+  "distributed": {
+    "enabled": true,
+    "aggregator": {
+      "ssh": "maarten@127.0.0.1",
+      "host": "127.0.0.1",
+      "port": 5000,
+      "umaPortBase": 7000,
+      "solidPortBase": 8000,
+      "repoPath": "~/Documents/doctoraat/code/query-aggregator-evaluation",
+      "dataRoot": "~/Documents/doctoraat/code/query-aggregator-evaluation/experiment-data"
+    },
+    "umaCss": {
+      "ssh": "maarten@127.0.0.1",
+      "host": "127.0.0.1",
+      "umaPortBase": 4000,
+      "solidPortBase": 3000,
+      "repoPath": "~/Documents/doctoraat/code/query-aggregator-evaluation",
+      "dataRoot": "~/Documents/doctoraat/code/query-aggregator-evaluation/experiment-data"
+    }
+  },
   "experiments": {
     "wp-overview-experiment": {
       "type": "watchparty-overview-page",
@@ -78,6 +97,21 @@
         }
       ]
     },
+    "el-overview-simple-experiment": {
+      "type": "elevate-activities-page",
+      "iterations": [
+        {
+          "iterationName": "activities-complexity",
+          "args": [
+            ["complex", "simple", 1],
+            ["complex", "simple", 5],
+            ["complex", "simple", 10],
+            ["complex", "simple", 15],
+            ["complex", "simple", 20]
+          ]
+        }
+      ]
+    },
     "el-overview-normal-experiment": {
       "type": "elevate-activities-page",
       "iterations": [
@@ -115,7 +149,7 @@
           "iterationName": "activities-count",
           "args": [
             ["complex", "fitness-trend", 1],
-            ["complex", "fitness-trend", 2],
+            ["complex", "fitness-trend", 5],
             ["complex", "fitness-trend", 10],
             ["complex", "fitness-trend", 15],
             ["complex", "fitness-trend", 20],
@@ -134,7 +168,8 @@
             ["complex", "year-progress", 5],
             ["complex", "year-progress", 10],
             ["complex", "year-progress", 15],
-            ["complex", "year-progress", 20]
+            ["complex", "year-progress", 20],
+            ["complex", "year-progress", 25]
           ]
         }
       ]
