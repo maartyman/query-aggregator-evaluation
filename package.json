@@ -7,6 +7,7 @@
     "build": "tsc",
     "postinstall": "node scripts/patch-trustflows-client.cjs",
     "start": "npm run build && node ./dist/main.js",
+    "stop": "node scripts/stop-servers.cjs",
     "start-uma": "cd ../original-uma/packages/uma && yarn start",
     "start-css": "cd ../original-uma/packages/css && yarn run community-solid-server -m . -c ./config/default.json -a http://localhost:4000/ -f /home/maarten/Documents/doctoraat/code/query-aggregator-evaluation/experiment-data/test-experiment-2"
   },

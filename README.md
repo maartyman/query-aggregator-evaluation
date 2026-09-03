@@ -70,6 +70,82 @@ For a smoke test without warmup and with one measured run per benchmark:
 WARMUP_RUNS=0 RECORDED_RUNS=1 npm start
 ```
 
+### Solution timeout
+
+Each solution (local, local indexed, aggregator and aggregator discovered) is evaluated under a
+per-run wall-clock timeout. If a single measured run of a solution takes longer than the timeout,
+that run is stopped, all of the solution's other runs are discarded, and the solution as a whole is
+recorded as timed out (`timedOut: true` in the result JSON) instead of producing timing data.
+
+The timeout defaults to 10 seconds and can be changed with `SOLUTION_TIMEOUT_MS` (milliseconds):
+
+```
+SOLUTION_TIMEOUT_MS=10000 npm start
+```
+
+### Run distributed
+
+The experiment node can start UMA/CSS and the aggregator on remote machines over SSH by adding a
+`distributed` block to the experiment config. See `configs/distributed.example.json`.
+
+For your current machines:
+
+```json
+"distributed": {
+  "enabled": true,
+  "aggregator": {
+    "ssh": "ubuntu@10.10.222.238",
+    "host": "10.10.222.238",
+    "port": 5000,
+    "repoPath": "/home/ubuntu/query-aggregator-evaluation"
+  },
+  "umaCss": {
+    "ssh": "ubuntu@10.10.221.160",
+    "host": "10.10.221.160",
+    "umaPortBase": 4000,
+    "solidPortBase": 3000,
+    "repoPath": "/home/ubuntu/query-aggregator-evaluation",
+    "dataRoot": "/home/ubuntu/query-aggregator-evaluation/experiment-data"
+  }
+}
+```
+
+Run it from the experiment node:
+
+```bash
+npm start -- --config configs/distributed.example.json
+```
+
+The experiment node will generate data locally, copy it to the UMA/CSS node with `rsync`, start UMA
+and CSS on `10.10.221.160`, start the aggregator on `10.10.222.238`, wait for readiness logs, run
+the benchmark, and stop the remote processes during cleanup/retry. The remote machines must already
+have this repository, dependencies, Go/Node/Yarn, Docker/KinD/Kubernetes for the aggregator, and
+working SSH access from the experiment node.
+
+### Dedicated aggregator stack
+
+By default (`AGGREGATOR_DEDICATED_STACK=true`), the aggregator evaluates against a separate, 
+identical CSS and UMA stack to avoid server-side contention: expensive queries on the primary stack 
+do not pollute auth timings for the aggregator, which uses its own isolated servers.
+
+In local mode, a second UMA/CSS stack starts on distinct port ranges (solid 6000+i, uma 7000+i). 
+The aggregator uses this stack (via its own PodContext) while local experiments use the primary 
+stack (solid 3000+i, uma 4000+i).
+
+In distributed mode, the aggregator machine runs both the Go aggregator AND a mirrored, identical 
+CSS/UMA stack (also solid 3000+i, uma 4000+i on that machine). The aggregator's pod data is copied 
+via `rsync` and rewritten to point to the aggregator-machine servers, achieving full isolation.
+
+To revert to the legacy shared-stack behavior (one stack for both local and aggregator), set:
+
+```bash
+AGGREGATOR_DEDICATED_STACK=false npm start
+```
+
+For distributed mode, configure aggregator-machine CSS/UMA ports in the config's `aggregator` block 
+(defaults: `solidPortBase: 3000, umaPortBase: 4000, dataRoot` required). See 
+`configs/distributed.example.json`.
+
 ## benchmark dimensions
 
 ### Authorization modes

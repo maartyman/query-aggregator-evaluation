@@ -2,6 +2,7 @@
 __pycache__/
 experiment-data/
 results/
+results-old/
 .aggregators.json
 tmp/
 
