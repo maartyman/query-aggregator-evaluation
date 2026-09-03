@@ -185,8 +185,8 @@ func FetchHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set(key, value)
 	}
 
-	// If we redirected a localhost URL, set the Host header to the original localhost value
-	if fetchReq.URL != originalURLStr && strings.HasPrefix(originalHost, "localhost") {
+	// If we redirected a loopback URL, set the Host header to the original loopback value.
+	if fetchReq.URL != originalURLStr && isLoopbackHost(originalURL.Hostname()) {
 		req.Host = originalHost
 		logrus.WithFields(logrus.Fields{"original_host": originalHost}).Debug("🔧 Setting Host header to original value")
 	}
@@ -644,6 +644,10 @@ func hostCandidateOK(host string, port string) bool {
 	return true
 }
 
+func isLoopbackHost(host string) bool {
+	return strings.EqualFold(host, "localhost") || strings.HasPrefix(host, "127.")
+}
+
 // getReachableHostForLocal returns a host alias or IP on which the given port appears reachable from this container.
 // Preference order: env overrides -> host.docker.internal -> host.containers.internal -> common docker bridges.
 func getReachableHostForLocal(port string) string {
@@ -695,7 +699,7 @@ func redirectLocalhostURL(originalURL string) string {
 	}
 
 	// Localhost handling
-	if hostname == "localhost" || hostname == "127.0.0.1" {
+	if isLoopbackHost(hostname) {
 		cand := getReachableHostForLocal(port)
 		parsedURL.Host = net.JoinHostPort(cand, port)
 		redirectedURL := parsedURL.String()
