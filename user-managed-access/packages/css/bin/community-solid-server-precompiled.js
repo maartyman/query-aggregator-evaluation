@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const path = require('node:path');
+require('../../uma/bin/allow-http-oidc-uri-claims');
 
 function getConfigArgs(argv) {
   const configs = [];

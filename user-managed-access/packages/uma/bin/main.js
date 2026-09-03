@@ -3,6 +3,7 @@ const yargs = require('yargs/yargs');
 const { hideBin } = require('yargs/helpers');
 const { ComponentsManager } = require('componentsjs');
 const { setGlobalLoggerFactory, WinstonLoggerFactory } = require('global-logger-factory');
+require('./allow-http-oidc-uri-claims');
 
 const argv = yargs(hideBin(process.argv))
   .option('port', {
