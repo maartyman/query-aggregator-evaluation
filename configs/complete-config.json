@@ -88,11 +88,11 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "minimal", 1],
-            ["complex", "minimal", 5],
-            ["complex", "minimal", 10],
-            ["complex", "minimal", 15],
-            ["complex", "minimal", 20]
+            ["minimal", "minimal", 1],
+            ["minimal", "minimal", 5],
+            ["minimal", "minimal", 10],
+            ["minimal", "minimal", 15],
+            ["minimal", "minimal", 20]
           ]
         }
       ]
@@ -103,11 +103,11 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "simple", 1],
-            ["complex", "simple", 5],
-            ["complex", "simple", 10],
-            ["complex", "simple", 15],
-            ["complex", "simple", 20]
+            ["simple", "simple", 1],
+            ["simple", "simple", 5],
+            ["simple", "simple", 10],
+            ["simple", "simple", 15],
+            ["simple", "simple", 20]
           ]
         }
       ]
@@ -118,11 +118,11 @@
         {
           "iterationName": "activities-complexity",
           "args": [
-            ["complex", "normal", 1],
-            ["complex", "normal", 5],
-            ["complex", "normal", 10],
-            ["complex", "normal", 15],
-            ["complex", "normal", 20]
+            ["normal", "normal", 1],
+            ["normal", "normal", 5],
+            ["normal", "normal", 10],
+            ["normal", "normal", 15],
+            ["normal", "normal", 20]
           ]
         }
       ]

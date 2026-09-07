@@ -27,9 +27,17 @@ const SelectedColumnsMap: Record<string, {
     filterKeys: [],
     sort: { key: "activity_startTime", ascending: true }
   },
+  "simple": {
+    keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance",
+      "activity_stats_movingTime"
+    ],
+    filterKeys: [],
+    sort: { key: "activity_startTime", ascending: true }
+  },
   "normal": {
     keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance",
-      "activity_stats_movingTime", "activity_stats_scores_stress_hrss"
+      "activity_stats_movingTime", "activity_stats_scores_stress_hrss",
+      "activity_stats_heartRate_max", "activity_stats_heartRate_avg", "activity_stats_elevationGain"
     ],
     filterKeys: [],
     sort: { key: "activity_startTime", ascending: true }

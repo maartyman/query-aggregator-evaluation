@@ -183,6 +183,7 @@ The active benchmark set is configured in `configs/complete-config.json`.
 | `wp-messages-experiment` | Watch Party watch page | Number of members and number of messages per member. |
 | `el-activity-experiment` | Elevate activity page | Activity complexity: `minimal`, `simple`, `normal`, `complex`. |
 | `el-overview-minimal-experiment` | Elevate activities overview | Number of activities with minimal selected fields. |
+| `el-overview-simple-experiment` | Elevate activities overview | Number of activities with simple selected fields. |
 | `el-overview-normal-experiment` | Elevate activities overview | Number of activities with normal selected fields. |
 | `el-overview-complex-experiment` | Elevate activities overview | Number of activities with complex selected fields. |
 | `el-fitness-trend-experiment` | Elevate fitness trend page | Number of activities for the fitness trend view. |
