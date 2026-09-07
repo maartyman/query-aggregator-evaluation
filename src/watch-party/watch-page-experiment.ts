@@ -19,7 +19,6 @@ import {Logger} from "../utils/logger";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot} from "../utils/http-metrics";
-import {SolutionTimeoutTracker} from "../utils/solution-timeout";
 
 const queryRoom = `PREFIX schema: <http://schema.org/>
 SELECT ?messageBoxUrl
@@ -107,29 +106,56 @@ async function runQueriesInWorker(podContext: PodContext, room: string, cache: C
     const messageBoxLocations = [...new Set(rawMessageBoxLocations)];
     await store.add(messageBoxLocations, resourceFetch);
 
-    const rawCreatorLocations = await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
-      sources: store.getMany(messageBoxLocations),
-      ...queryContext,
-    })).map((bindings) => bindings.get('creator')!.value).toArray();
+    const rawCreatorLocations = (
+      await Promise.all(messageBoxLocations.map(async messageBoxUrl =>
+        (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageBoxUrl}>`), {
+          sources: [store.get(messageBoxUrl)],
+          ...queryContext,
+        })).map((bindings) => bindings.get('creator')!.value).toArray()
+      ))
+    ).flat();
     const creatorLocations = [...new Set(rawCreatorLocations)];
     await store.add(creatorLocations, resourceFetch);
 
     const setupHttpMetrics = await getHttpMetricsSnapshot();
     const startTime = ExperimentResult.startMeasurement();
-    await (await engine.queryBindings(queryRoom, {
+    const roomBindingsStream = await engine.queryBindings(queryRoom, {
       sources: [ store.get(roomIri) ],
       ...queryContext,
+    });
+
+    const creators = new Set();
+    const resultIterator = new UnionIterator<any>(new UnionIterator<any>(roomBindingsStream.transform({
+      transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+        const messageBoxUrl = bindings.get('messageBoxUrl')!.value;
+        push(await engine.queryBindings(
+          queryMessages.replace(/\$messageBoxUrl\$/g, `<${messageBoxUrl}>`),
+          {
+            sources: [store.get(messageBoxUrl)],
+            ...queryContext,
+          }
+        ));
+        done();
+      },
     }))
-      .toArray();
-    await (await engine.queryBindings(queryMessages.replace(/\$messageBoxUrl\$/g, `?messageBox`), {
-      sources: store.getMany(messageBoxLocations),
-      ...queryContext,
-    }))
-      .toArray();
-    const resultIterator = await engine.queryBindings(queryPerson, {
-      sources: store.getMany(creatorLocations),
-      ...queryContext,
-    })
+      .transform({
+        transform: async (bindings, done: () => void, push: (bindingsStream: any) => void) => {
+          const creator = bindings.get('creator')!.value;
+          if (creators.has(creator)) {
+            return done();
+          }
+          creators.add(creator);
+          push(await engine.queryBindings(
+            queryPerson,
+            {
+              sources: [store.get(creator)],
+              ...queryContext,
+            }
+          ));
+          done();
+        },
+      })
+    );
 
     return await ExperimentResult.fromIterator(
       podContext.name + "_" + cache,
@@ -207,7 +233,6 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
-    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -215,26 +240,36 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
           const podName = iterationConfig.iterationName + "-" + arg.join("_") + "_query-user";
           const podContext = this.getPodContextByName(podName);
           for (const cache of ["no-cache", "indexed-cache"] as const) {
-            const solutionKey = podContext.name + "_" + cache;
-            if (tracker.isTimedOut(solutionKey)) {
-              continue;
-            }
             Logger.info(`Running local experiment for pod ${podName}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            const logLevel = Logger.getLevel();
-            const worker = new Worker(__filename, {
-              workerData: {logLevel, podContext, roomName: this.room, cache, authorizationMode: this.experimentConfig.authorizationMode}
+            await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel();
+              const worker = new Worker(__filename, {
+                workerData: {logLevel, podContext, roomName: this.room, cache, authorizationMode: this.experimentConfig.authorizationMode}
+              });
+
+              worker.on("message", message => {
+                if (message.success) {
+                  const experimentResult = ExperimentResult.deserialize(message.result);
+                  results.push(experimentResult);
+                  resolve(experimentResult);
+                } else {
+                  reject(new Error(message.error));
+                }
+                void worker.terminate();
+              });
+
+              worker.on("error", error => {
+                console.error(`Worker error for ${podContext.name}:`, error);
+                reject(error);
+              });
             });
-            const result = await tracker.runWorkerSolution(solutionKey, worker);
-            if (result) {
-              results.push(result);
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return tracker.finalize(results);
+    return results;
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
@@ -247,7 +282,6 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
   private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
-    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -260,9 +294,6 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
 
           for (const cache of ["no-cache"]) {
             const solutionKey = podContext.name + (discover ? "_aggregator_discovered" : "_aggregator");
-            if (tracker.isTimedOut(solutionKey)) {
-              continue;
-            }
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${podName}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(podContext, roomSource, expectedMembers, expectedMessages);
 
@@ -273,7 +304,7 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
             await auth?.getAccessToken();
             const serviceClient = auth ?? createMeasuredFetch();
 
-            const aggregatorResult = await tracker.runSolution(solutionKey, async () => {
+            const aggregatorResult = await (async () => {
               const setupHttpMetrics = await getHttpMetricsSnapshot();
               const startTime = ExperimentResult.startMeasurement();
               const timedAggregatorResult = discover
@@ -287,17 +318,15 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
                 { setupHttpMetrics, ...(timedAggregatorResult.metrics ?? {}) },
                 timedAggregatorResult.phaseTimings
               );
-            });
-            if (aggregatorResult) {
-              results.push(aggregatorResult);
-            }
+            })();
+            results.push(aggregatorResult);
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return tracker.finalize(results);
+    return results;
   }
 
   private async setupAggregator(

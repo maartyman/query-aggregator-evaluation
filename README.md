@@ -70,19 +70,6 @@ For a smoke test without warmup and with one measured run per benchmark:
 WARMUP_RUNS=0 RECORDED_RUNS=1 npm start
 ```
 
-### Solution timeout
-
-Each solution (local, local indexed, aggregator and aggregator discovered) is evaluated under a
-per-run wall-clock timeout. If a single measured run of a solution takes longer than the timeout,
-that run is stopped, all of the solution's other runs are discarded, and the solution as a whole is
-recorded as timed out (`timedOut: true` in the result JSON) instead of producing timing data.
-
-The timeout defaults to 10 seconds and can be changed with `SOLUTION_TIMEOUT_MS` (milliseconds):
-
-```
-SOLUTION_TIMEOUT_MS=10000 npm start
-```
-
 ### Run distributed
 
 The experiment node can start UMA/CSS and the aggregator on remote machines over SSH by adding a

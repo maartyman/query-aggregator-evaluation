@@ -13,7 +13,6 @@ import {CachingStrategy} from "../utils/caching-strategy";
 import {AsyncIterator} from "asynciterator";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
-import {SolutionTimeoutTracker} from "../utils/solution-timeout";
 
 const aggregatorFromServiceRel = "https://w3id.org/aggregator#fromService";
 
@@ -336,7 +335,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
-    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -356,26 +354,36 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
 
           for (const cache of ["no-cache", "indexed-cache"] as const) {
-            const solutionKey = this.podContext.name + "_" + selectedColumns + "_" + cache;
-            if (tracker.isTimedOut(solutionKey)) {
-              continue;
-            }
             Logger.info(`Running local experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            const logLevel = Logger.getLevel();
-            const worker = new Worker(__filename, {
-              workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache, authorizationMode: this.experimentConfig.authorizationMode}
+            await new Promise<ExperimentResult>((resolve, reject) => {
+              const logLevel = Logger.getLevel();
+              const worker = new Worker(__filename, {
+                workerData: {logLevel, podContext: this.podContext, activityLocations, selectedColumns, cache, authorizationMode: this.experimentConfig.authorizationMode}
+              });
+
+              worker.on("message", message => {
+                if (message.success) {
+                  const experimentResult = ExperimentResult.deserialize(message.result);
+                  results.push(experimentResult);
+                  resolve(experimentResult);
+                } else {
+                  reject(new Error(message.error));
+                }
+                void worker.terminate();
+              });
+
+              worker.on("error", error => {
+                console.error(`Worker error for ${this.podContext!.name}:`, error);
+                reject(error);
+              });
             });
-            const result = await tracker.runWorkerSolution(solutionKey, worker);
-            if (result) {
-              results.push(result);
-            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return tracker.finalize(results);
+    return results;
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
@@ -388,7 +396,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
   private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
-    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -409,9 +416,6 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
 
           for (const cache of ["no-cache"]) {
             const solutionKey = this.podContext.name + "_" + selectedColumns + (discover ? "_aggregator_discovered" : "_aggregator");
-            if (tracker.isTimedOut(solutionKey)) {
-              continue;
-            }
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, selectedColumns ${selectedColumns}, iteration ${iteration + 1}/${iterations}`);
             await this.setupAggregator(this.podContext, activityLocations, selectedColumns);
 
@@ -420,7 +424,7 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
             await auth.getAccessToken();
 
             const podContext = this.podContext;
-            const aggregatorResult = await tracker.runSolution(solutionKey, async () => {
+            const aggregatorResult = await (async () => {
               resetHttpMetrics();
               const setupHttpMetrics = await getHttpMetricsSnapshot();
               const startTime = ExperimentResult.startMeasurement();
@@ -498,17 +502,15 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
                 },
                 phaseTimings
               );
-            });
-            if (aggregatorResult) {
-              results.push(aggregatorResult);
-            }
+            })();
+            results.push(aggregatorResult);
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return tracker.finalize(results);
+    return results;
   }
 }
 

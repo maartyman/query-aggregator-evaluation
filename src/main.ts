@@ -601,10 +601,6 @@ async function main() {
               const resultFileName = `${result.experimentId}_run-${runLabel}${suffix}.json`;
               const resultPath = path.join(resultsDir, resultFileName);
               result.save(resultPath);
-
-              if (result.timedOut) {
-                console.warn(`⏱ Solution ${result.experimentId} timed out; recorded as failed.`);
-              }
             } catch (saveError) {
               console.error(`✗ Failed to save result for ${result.experimentId}:`, saveError);
             }
