@@ -75,7 +75,8 @@ async function fetchAggregatorJsonWithTimings(
   outputUrl: string,
   phaseTimings: PhaseTiming[],
   cumulativeMs: number,
-  errorMessage: (response: Response, body: string) => string
+  errorMessage: (response: Response, body: string) => string,
+  signal?: AbortSignal
 ): Promise<{ json: any; cumulativeMs: number }> {
   const fetchService = getFetch(client);
   const outputFetchStart = process.hrtime();
@@ -83,7 +84,8 @@ async function fetchAggregatorJsonWithTimings(
     method: "GET",
     headers: {
       "Accept": "application/sparql-results+json"
-    }
+    },
+    signal
   });
   const outputFetchMs = ExperimentResult.millisecondsSince(outputFetchStart);
   const authTiming = client instanceof Auth ? client.consumeLastFetchTiming() : undefined;
@@ -166,7 +168,7 @@ export async function getAggregatorService(client: FetchClient, serviceId: strin
   return (await getAggregatorServiceWithTimings(client, serviceId)).json;
 }
 
-export async function getAggregatorServiceWithTimings(client: FetchClient, serviceId: string): Promise<TimedAggregatorResult> {
+export async function getAggregatorServiceWithTimings(client: FetchClient, serviceId: string, signal?: AbortSignal): Promise<TimedAggregatorResult> {
   const aggregatorUrl = getAggregatorUrl();
   const phaseTimings: PhaseTiming[] = [];
   const { json } = await fetchAggregatorJsonWithTimings(
@@ -174,7 +176,8 @@ export async function getAggregatorServiceWithTimings(client: FetchClient, servi
     `${aggregatorUrl}${serviceId}/`,
     phaseTimings,
     0,
-    (response, body) => `Failed to get aggregator. status: ${response.status}, body: ${body}`
+    (response, body) => `Failed to get aggregator. status: ${response.status}, body: ${body}`,
+    signal
   );
   return { json, phaseTimings };
 }
@@ -190,12 +193,13 @@ export async function getDiscoveredAggregatorService(
 export async function getDiscoveredAggregatorServiceWithTimings(
   client: FetchClient,
   sources: string[],
-  queryString: string
+  queryString: string,
+  signal?: AbortSignal
 ): Promise<TimedAggregatorResult> {
   const phaseTimings: PhaseTiming[] = [];
   let cumulativeMs = 0;
   const discoveryStart = process.hrtime();
-  const service = await discoverAggregatorService(client, sources, queryString);
+  const service = await discoverAggregatorService(client, sources, queryString, signal);
   const discoveryMs = ExperimentResult.millisecondsSince(discoveryStart);
   cumulativeMs = appendPhase(phaseTimings, cumulativeMs, "Discover the correct service", discoveryMs);
   const { json } = await fetchAggregatorJsonWithTimings(
@@ -203,7 +207,8 @@ export async function getDiscoveredAggregatorServiceWithTimings(
     service.outputUrl,
     phaseTimings,
     cumulativeMs,
-    (response, body) => `Failed to get discovered aggregator service. description: ${service.descriptionUrl}, output: ${service.outputUrl}, status: ${response.status}, body: ${body}`
+    (response, body) => `Failed to get discovered aggregator service. description: ${service.descriptionUrl}, output: ${service.outputUrl}, status: ${response.status}, body: ${body}`,
+    signal
   );
   return {
     json,
@@ -217,9 +222,10 @@ export async function getDiscoveredAggregatorServiceWithTimings(
 export async function discoverAggregatorService(
   client: FetchClient,
   sources: string[],
-  queryString: string
+  queryString: string,
+  signal?: AbortSignal
 ): Promise<{ descriptionUrl: string; outputUrl: string; serviceAlternatives: number }> {
-  const discovery = await discoverCandidateServiceDescriptions(client, sources, queryString);
+  const discovery = await discoverCandidateServiceDescriptions(client, sources, queryString, signal);
   if (discovery.candidateUrls.length === 1) {
     return {
       descriptionUrl: discovery.candidateUrls[0],
@@ -236,7 +242,8 @@ export async function discoverAggregatorService(
 async function discoverCandidateServiceDescriptions(
   client: FetchClient,
   sources: string[],
-  queryString: string
+  queryString: string,
+  signal?: AbortSignal
 ): Promise<{ candidateUrls: string[]; serviceAlternatives: number }> {
   const fetchService = getFetch(client);
   const sourceUrls = orderDiscoverySources(Array.from(new Set(sources.map(stripFragment))));
@@ -248,7 +255,7 @@ async function discoverCandidateServiceDescriptions(
   }>();
 
   for (let index = 0; index < sourceUrls.length; index++) {
-    const response = await fetchDiscoveryResource(fetchService, sourceUrls[index]);
+    const response = await fetchDiscoveryResource(fetchService, sourceUrls[index], signal);
     if (!response.ok) {
       continue;
     }
@@ -264,7 +271,7 @@ async function discoverCandidateServiceDescriptions(
       sourceServices;
 
     pruneDescriptionFetches(descriptionFetches, candidates);
-    startDescriptionFetches(fetchService, candidates, descriptionFetches);
+    startDescriptionFetches(fetchService, candidates, descriptionFetches, signal);
 
     const shouldTryMatch = candidates.size <= 8 || index === sourceUrls.length - 1;
     if (shouldTryMatch) {
@@ -288,7 +295,8 @@ async function discoverCandidateServiceDescriptions(
 function startDescriptionFetches(
   fetchService: FetchLike,
   candidates: Set<string>,
-  descriptionFetches: Map<string, { controller: AbortController; promise: Promise<string | undefined> }>
+  descriptionFetches: Map<string, { controller: AbortController; promise: Promise<string | undefined> }>,
+  signal?: AbortSignal
 ): void {
   for (const descriptionUrl of candidates) {
     if (descriptionFetches.has(descriptionUrl)) {
@@ -296,6 +304,9 @@ function startDescriptionFetches(
     }
 
     const controller = new AbortController();
+    if (signal) {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
     const promise = fetchServiceDescription(fetchService, descriptionUrl, controller.signal)
       .catch(() => undefined);
     descriptionFetches.set(descriptionUrl, { controller, promise });
@@ -350,11 +361,12 @@ async function findMatchingDescription(
   return undefined;
 }
 
-async function fetchDiscoveryResource(fetchService: FetchLike, source: string): Promise<Response> {
+async function fetchDiscoveryResource(fetchService: FetchLike, source: string, signal?: AbortSignal): Promise<Response> {
   const isContainer = source.endsWith("/");
   return await fetchService(source, {
     method: isContainer ? "GET" : "HEAD",
-    headers: isContainer ? { "Accept": "text/turtle" } : undefined
+    headers: isContainer ? { "Accept": "text/turtle" } : undefined,
+    signal
   });
 }
 

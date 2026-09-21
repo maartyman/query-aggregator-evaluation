@@ -70,6 +70,16 @@ For a smoke test without warmup and with one measured run per benchmark:
 WARMUP_RUNS=0 RECORDED_RUNS=1 npm start
 ```
 
+### Solution timeout
+
+Each measured query execution has a wall-clock timeout. The timer starts at `ExperimentResult.startMeasurement()`—after setup, authentication, and local indexed-data preparation. A timed-out worker is terminated; an aggregator request is aborted and awaited before the next run starts. The whole solution is then recorded as timed out (`timedOut: true`) and its other runs are skipped.
+
+The default is 10 seconds and can be changed with `SOLUTION_TIMEOUT_MS` (milliseconds):
+
+```
+SOLUTION_TIMEOUT_MS=10000 npm start
+```
+
 ### Run distributed
 
 The experiment node can start UMA/CSS and the aggregator on remote machines over SSH by adding a

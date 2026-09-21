@@ -31,6 +31,7 @@ export interface ActivityAggregatorOptions {
   expectedBindings?: number | null;
   phaseTimings?: PhaseTiming[];
   serviceAlternativeCounts?: number[];
+  abortSignal?: AbortSignal;
 }
 
 export class ActivityRDFRead {
@@ -280,8 +281,8 @@ PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 
       // Get results from aggregator
       const timedAggregatorResults = options.aggregator.discover
-        ? await getDiscoveredAggregatorServiceWithTimings(options.auth, sources, query)
-        : await this.queryViaAggregator(options.auth, query, sources, serviceKey, options.aggregator.expectedBindings);
+        ? await getDiscoveredAggregatorServiceWithTimings(options.auth, sources, query, options.aggregator.abortSignal)
+        : await this.queryViaAggregator(options.auth, query, sources, serviceKey, options.aggregator.expectedBindings, options.aggregator.abortSignal);
       options.aggregator.phaseTimings?.push(...timedAggregatorResults.phaseTimings);
       this.recordServiceAlternatives(options.aggregator, timedAggregatorResults.metrics);
       const aggregatorResults = timedAggregatorResults.json;
@@ -1243,10 +1244,11 @@ _:Query
     queryString: string,
     sources: string[],
     serviceKey: string,
-    expectedBindings: number | null = 0
+    expectedBindings: number | null = 0,
+    signal?: AbortSignal
   ): Promise<{ json: any; phaseTimings: PhaseTiming[]; metrics?: Record<string, any> }> {
     const serviceId = await this.getOrCreateAggregatorService(auth, queryString, sources, serviceKey, expectedBindings);
-    return await getAggregatorServiceWithTimings(auth, serviceId);
+    return await getAggregatorServiceWithTimings(auth, serviceId, signal);
   }
 
   private recordServiceAlternatives(

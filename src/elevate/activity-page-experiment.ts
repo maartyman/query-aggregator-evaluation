@@ -12,6 +12,7 @@ import path from "node:path";
 import {CachingStrategy} from "../utils/caching-strategy";
 import {IndexedStore} from "../utils/indexed-store";
 import {createMeasuredFetch, getHttpMetricsSnapshot, resetHttpMetrics} from "../utils/http-metrics";
+import {SolutionTimeoutTracker} from "../utils/solution-timeout";
 
 async function withResultRetry<T>(
   fn: () => Promise<T>,
@@ -36,6 +37,11 @@ async function withResultRetry<T>(
   throw lastError;
 }
 
+function startWorkerMeasurement(): [number, number] {
+  parentPort?.postMessage({ type: "measurement-started" });
+  return ExperimentResult.startMeasurement();
+}
+
 async function runQueriesInWorker(podContext: PodContext, activityLocation: string, cache: CachingStrategy, authorizationMode = "nondelegated"): Promise<ExperimentResult> {
   const auth = authorizationMode === "no-auth" ? undefined : new Auth(podContext, {enableCache: false});
   await auth?.init();
@@ -54,7 +60,7 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
       await store.add([activityUrl], resourceFetch);
 
       const setupHttpMetrics = await getHttpMetricsSnapshot();
-      const startTime = ExperimentResult.startMeasurement();
+      const startTime = startWorkerMeasurement();
 
       const resultIterator = await activityDao.getById(activityIri, {
         auth,
@@ -73,7 +79,7 @@ async function runQueriesInWorker(podContext: PodContext, activityLocation: stri
 
   return await withResultRetry(async () => {
     const setupHttpMetrics = await getHttpMetricsSnapshot();
-    const startTime = ExperimentResult.startMeasurement();
+    const startTime = startWorkerMeasurement();
 
     const resultIterator = await activityDao.getById(activityIri, {
       auth,
@@ -227,6 +233,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -237,36 +244,25 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
           this.podContext = this.getUserPodContext(this.queryUser, experimentId);
           for (const cache of ["no-cache", "indexed-cache"] as const) {
+            const solutionKey = this.podContext.name + "_" + activityLocation + "_" + cache;
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running local experiment for pod ${this.podContext.name}, cache ${cache}, iteration ${iteration + 1}/${iterations}`);
-            await new Promise<ExperimentResult>((resolve, reject) => {
-              const logLevel = Logger.getLevel();
-              const worker = new Worker(__filename, {
-                workerData: {logLevel, podContext: this.podContext, activityLocation, cache, authorizationMode: this.experimentConfig.authorizationMode}
-              });
-
-              worker.on("message", message => {
-                if (message.success) {
-                  const experimentResult = ExperimentResult.deserialize(message.result);
-                  results.push(experimentResult);
-                  resolve(experimentResult);
-                } else {
-                  reject(new Error(message.error));
-                }
-                void worker.terminate();
-              });
-
-              worker.on("error", error => {
-                console.error(`Worker error for ${this.podContext!.name}:`, error);
-                reject(error);
-              });
+            const worker = new Worker(__filename, {
+              workerData: {logLevel: Logger.getLevel(), podContext: this.podContext, activityLocation, cache, authorizationMode: this.experimentConfig.authorizationMode}
             });
+            const result = await tracker.runWorkerSolution(solutionKey, worker);
+            if (result) {
+              results.push(result);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 
   async runAggregator(iterations: number): Promise<ExperimentResult[]> {
@@ -279,6 +275,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
   private async runAggregatorMode(iterations: number, discover: boolean): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
+    const tracker = new SolutionTimeoutTracker();
 
     for (let iteration = 0; iteration < iterations; iteration++) {
       for (const iterationConfig of this.experimentConfig.iterations) {
@@ -291,6 +288,9 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
 
           for (const cache of ["no-cache"]) {
             const solutionKey = this.podContext.name + "_" + activityLocation + (discover ? "_aggregator_discovered" : "_aggregator");
+            if (tracker.isTimedOut(solutionKey)) {
+              continue;
+            }
             Logger.info(`Running ${discover ? "discovered aggregator" : "aggregator"} experiment for pod ${this.podContext.name}, iteration ${iteration + 1}/${iterations}`);
 
             await this.setupAggregator(this.podContext, activityLocation);
@@ -301,7 +301,7 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
             await auth.getAccessToken();
 
             const podContext = this.podContext;
-            const aggregatorResult = await (async () => {
+            const aggregatorResult = await tracker.runSolution(solutionKey, async signal => {
               resetHttpMetrics();
               const setupHttpMetrics = await getHttpMetricsSnapshot();
               const startTime = ExperimentResult.startMeasurement();
@@ -320,7 +320,8 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
                   discover,
                   expectedBindings: 1,
                   phaseTimings,
-                  serviceAlternativeCounts
+                  serviceAlternativeCounts,
+                  abortSignal: signal
                 },
                 auth
               });
@@ -356,15 +357,17 @@ export class ActivityPageExperiment extends ElevateDataGenerator implements Expe
                 },
                 phaseTimings
               );
-            })();
-            results.push(aggregatorResult);
+            });
+            if (aggregatorResult) {
+              results.push(aggregatorResult);
+            }
 
             await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
       }
     }
-    return results;
+    return tracker.finalize(results);
   }
 }
 
