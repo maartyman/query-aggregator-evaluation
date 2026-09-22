@@ -886,20 +886,15 @@ export const ActivitySparqlFieldMap: {
   activity_stats: {
     graphPattern:
       "?activity activo:hasStats ?activity_stats .\n" +
-      "FILTER NOT EXISTS {\n" +
-      "?activity_stats prov:wasGeneratedBy ?activity_stats_recordingActivity .\n" +
-      "?activity_stats_recordingActivity a activo:RecordingActivity .\n" +
-      "}",
+      "?activity_stats prov:wasGeneratedBy ?activity_stats_computationActivity .\n" +
+      "?activity_stats_computationActivity a activo:StatsComputationActivity .",
     graphPatternIncremental:
       "{\n" +
       "  SELECT ?activity ?activity_stats\n" +
       "  WHERE {\n" +
       "    ?activity activo:hasStats ?activity_stats .\n" +
-      "\n" +
-      "    FILTER NOT EXISTS {\n" +
-      "      ?activity_stats prov:wasGeneratedBy ?activity_stats_recordingActivity .\n" +
-      "      ?activity_stats_recordingActivity a activo:RecordingActivity .\n" +
-      "    }\n" +
+      "    ?activity_stats prov:wasGeneratedBy ?activity_stats_computationActivity .\n" +
+      "    ?activity_stats_computationActivity a activo:StatsComputationActivity .\n" +
       "  }\n" +
       "}",
     requiredVariable: "activity",
