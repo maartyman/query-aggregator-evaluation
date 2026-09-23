@@ -17,3 +17,5 @@ The generated site is written to:
 Shared data loading for the app lives in:
 
 `analysis/results_data.py`
+
+Duration charts show the median per benchmark point with two-sided 95% distribution-free confidence intervals for the population median. Timed-out runs are excluded from all analysis outputs.

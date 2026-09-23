@@ -20,7 +20,7 @@ from results_data import (
 
 SITE_DIR = Path(__file__).resolve().parent / "output" / "site"
 SITE_PATH = SITE_DIR / "index.html"
-DEFAULT_DIEFFICIENCY_METRIC = "medianDief1s"
+DEFAULT_DIEFFICIENCY_METRIC = "medianDief2500ms"
 
 DIEFFICIENCY_LABELS = {
     "medianDief100ms": "Median dief@100ms",
@@ -37,12 +37,32 @@ VARIANT_SYMBOLS = {
     "Aggregator": "diamond",
 }
 
+# Keep related use cases together and present increasing Elevate complexity in its
+# natural progression.  The participants experiment is derived from the members
+# iteration of wp-messages-experiment in results_data.py.
+EXPERIMENT_ORDER = (
+    "wp-overview-experiment",
+    "wp-participants-experiment",
+    "wp-messages-experiment",
+    "el-activity-experiment",
+    "el-overview-minimal-experiment",
+    "el-overview-simple-experiment",
+    "el-overview-normal-experiment",
+    "el-overview-complex-experiment",
+    "el-fitness-trend-experiment",
+    "el-yearly-progression-experiment",
+)
+EXPERIMENT_ORDER_INDEX = {name: index for index, name in enumerate(EXPERIMENT_ORDER)}
+
 
 _summary_df, aggregates_df, phase_aggregates_df, _validation = load_or_build_dataframes()
 
 
 def experiments() -> list[str]:
-    return sorted(aggregates_df["experimentName"].dropna().unique())
+    return sorted(
+        aggregates_df["experimentName"].dropna().unique(),
+        key=lambda name: (EXPERIMENT_ORDER_INDEX.get(name, len(EXPERIMENT_ORDER)), name),
+    )
 
 
 def authorization_order(dataframe: pd.DataFrame) -> list[str]:
@@ -101,6 +121,8 @@ def duration_figure(dataframe: pd.DataFrame, experiment_name: str):
         y="medianDurationMs",
         color="variant",
         symbol="variant",
+        error_y="durationCiUpperErrorMs",
+        error_y_minus="durationCiLowerErrorMs",
         facet_col="authorizationMode",
         markers=True,
         category_orders={
@@ -118,6 +140,8 @@ def duration_figure(dataframe: pd.DataFrame, experiment_name: str):
             "iterationArgs": True,
             "runs": True,
             "medianDurationMs": ":.3f",
+            "durationCiLowerMs": ":.3f",
+            "durationCiUpperMs": ":.3f",
             "medianHttpRequests": ":.3f",
             "medianResourceRequests": ":.3f",
             "medianAuthorizationTokenRequests": ":.3f",
@@ -128,6 +152,8 @@ def duration_figure(dataframe: pd.DataFrame, experiment_name: str):
         labels={
             "iterationArgs": "Iteration argument",
             "medianDurationMs": "Median duration (ms)",
+            "durationCiLowerMs": "95% CI lower bound (ms)",
+            "durationCiUpperMs": "95% CI upper bound (ms)",
             "variant": "Variant",
             "authorizationMode": "Authorization",
             "medianHttpRequests": "Measured median HTTP requests",
@@ -137,7 +163,7 @@ def duration_figure(dataframe: pd.DataFrame, experiment_name: str):
             "medianOverallHttpRequests": "Overall median HTTP requests",
             "medianServiceAlternatives": "Median service alternatives",
         },
-        title=f"{experiment_name}: median duration",
+        title=f"{experiment_name}: median duration (95% CI)",
     )
     figure.update_layout(height=440)
     return figure

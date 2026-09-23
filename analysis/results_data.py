@@ -61,6 +61,10 @@ AGGREGATE_COLUMNS = [
     "averageDurationMs",
     "minDurationMs",
     "maxDurationMs",
+    "durationCiLowerMs",
+    "durationCiUpperMs",
+    "durationCiLowerErrorMs",
+    "durationCiUpperErrorMs",
     "medianHttpRequests",
     "medianResourceRequests",
     "medianAuthorizationTokenRequests",
@@ -144,6 +148,8 @@ VARIANT_COLORS = {
 }
 
 EXCLUDED_CACHE_STRATEGIES = {"file-cache"}
+MEDIAN_CI_CONFIDENCE_LEVEL = 0.95
+ANALYSIS_SCHEMA_VERSION = 2
 
 WP_MESSAGES_EXPERIMENT = "wp-messages-experiment"
 WP_PARTICIPANTS_EXPERIMENT = "wp-participants-experiment"
@@ -314,6 +320,8 @@ def load_results(results_dir: Path = RESULTS_DIR) -> list[dict[str, Any]]:
             data = json.load(handle)
         parameters = data.get("parameters") or {}
         timestamps = data.get("timestamps") or []
+        if data.get("timedOut") or parameters.get("timedOut"):
+            continue
         if parameters.get("cacheStrategy") in EXCLUDED_CACHE_STRATEGIES:
             continue
         file_name = path.name
@@ -474,11 +482,40 @@ def aggregate_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def median_confidence_interval(values: list[float], confidence_level: float = MEDIAN_CI_CONFIDENCE_LEVEL) -> tuple[float | None, float | None]:
+    """Return a two-sided, distribution-free CI for the population median.
+
+    The interval is formed from order statistics. Its coverage is at least the
+    requested level when observations are independent and continuously
+    distributed, without assuming a particular distributional shape.
+    """
+    sample_size = len(values)
+    if sample_size < 2:
+        return None, None
+
+    denominator = 2 ** sample_size
+    cumulative_tail = 0
+    lower_rank = 0
+    for candidate_rank in range(1, sample_size // 2 + 1):
+        cumulative_tail += math.comb(sample_size, candidate_rank - 1)
+        coverage = 1 - 2 * cumulative_tail / denominator
+        if coverage < confidence_level:
+            break
+        lower_rank = candidate_rank
+
+    if lower_rank == 0:
+        return None, None
+    ordered_values = sorted(values)
+    return ordered_values[lower_rank - 1], ordered_values[sample_size - lower_rank]
+
+
 def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     aggregates = []
     for _, group in group_by(rows, aggregate_key).items():
         sample = group[0]
         durations = [row["totalDuration"] for row in group]
+        median_duration = median(durations)
+        ci_lower, ci_upper = median_confidence_interval(durations)
         result_counts = sorted({row["totalResults"] for row in group})
         aggregates.append(
             {
@@ -490,10 +527,14 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "cacheStrategy": sample["cacheStrategy"],
                 "runs": len(group),
                 "totalResults": "|".join(map(str, result_counts)),
-                "medianDurationMs": round(median(durations), 3),
+                "medianDurationMs": round(median_duration, 3),
                 "averageDurationMs": round(mean(durations), 3),
                 "minDurationMs": round(min(durations), 3),
                 "maxDurationMs": round(max(durations), 3),
+                "durationCiLowerMs": round(ci_lower, 3) if ci_lower is not None else None,
+                "durationCiUpperMs": round(ci_upper, 3) if ci_upper is not None else None,
+                "durationCiLowerErrorMs": round(median_duration - ci_lower, 3) if ci_lower is not None else None,
+                "durationCiUpperErrorMs": round(ci_upper - median_duration, 3) if ci_upper is not None else None,
                 "medianHttpRequests": round(median(row["totalHttpRequests"] for row in group), 3),
                 "medianResourceRequests": round(median(row["resourceRequests"] for row in group), 3),
                 "medianAuthorizationTokenRequests": round(median(row["authorizationTokenRequests"] for row in group), 3),
@@ -648,7 +689,11 @@ def load_or_build_dataframes(results_dir: Path = RESULTS_DIR, output_dir: Path =
         aggregates_df = normalize_frame(raw_aggregates_df)
         phases_df = normalize_frame(raw_phases_df)
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
-        if all(column in aggregates_df.columns for column in AGGREGATE_COLUMNS) and all(column in phases_df.columns for column in PHASE_COLUMNS):
+        if (
+            validation.get("analysisSchemaVersion") == ANALYSIS_SCHEMA_VERSION
+            and all(column in aggregates_df.columns for column in AGGREGATE_COLUMNS)
+            and all(column in phases_df.columns for column in PHASE_COLUMNS)
+        ):
             return summary_df, aggregates_df, phases_df, validation
         summary_df, aggregates_df, phases_df, validation = write_outputs(results_dir, output_dir)
         return summary_df, aggregates_df, phases_df, validation
@@ -668,6 +713,7 @@ def write_outputs(results_dir: Path = RESULTS_DIR, output_dir: Path = OUTPUT_DIR
     aggregates = aggregate(rows)
     phases = aggregate_phases(rows)
     validation = validate(rows)
+    validation["analysisSchemaVersion"] = ANALYSIS_SCHEMA_VERSION
 
     output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(output_dir / "summary.csv", rows, SUMMARY_COLUMNS)
