@@ -1,6 +1,6 @@
 {
   "podsPerServer": 10,
-  "useExistingData": false,
+  "useExistingData": true,
   "distributed": {
     "enabled": true,
     "aggregator": {

@@ -237,6 +237,25 @@ export class WatchPageExperiment extends WatchpartyDataGenerator implements Expe
     return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
+  reuseExistingData(): ExperimentSetup {
+    const queryUsers: PodContext[] = [];
+    for (const iteration of this.experimentConfig.iterations) {
+      for (const arg of iteration.args) {
+        const experimentId = `${iteration.iterationName}-${arg.join("_")}`;
+        const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
+        queryUsers.push(queryUserContext);
+        for (let i = 1; i <= arg[0]; i++) {
+          this.getUserPodContext(`user${i}`, experimentId);
+        }
+      }
+    }
+
+    if (queryUsers.length === 0) {
+      throw new Error("Cannot reuse watch-page data without an experiment iteration.");
+    }
+    return this.finalizeExistingData(queryUsers[0], queryUsers);
+  }
+
   async runLocal(iterations: number): Promise<ExperimentResult[]> {
     const results: ExperimentResult[] = [];
     const tracker = new SolutionTimeoutTracker();

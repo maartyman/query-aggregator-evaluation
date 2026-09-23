@@ -252,13 +252,17 @@ async function runExperiment(
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
   experimentDataRoot: string = "./experiment-data",
-  logSink?: ServerLogSink
+  logSink?: ServerLogSink,
+  experimentDataLabel?: string
 ): Promise<ExperimentResult[]> {
   if (loggingOptions?.experiment) {
     Logger.setLevel(loggingOptions.experiment);
   }
 
-  const experimentLocation = path.resolve(experimentDataRoot, experimentName);
+  const experimentDirectoryName = experimentDataLabel
+    ? `${experimentName}-${sanitizeFileName(experimentDataLabel)}`
+    : experimentName;
+  const experimentLocation = path.resolve(experimentDataRoot, experimentDirectoryName);
   let experiment: Experiment | null = null;
   let setup: ExperimentSetup | null = null;
 
@@ -300,8 +304,8 @@ async function runExperiment(
   if (!useExistingData || !fs.existsSync(experimentLocation)) {
     setup = experiment.generate();
   } else {
-    console.log(`Using existing data for experiment: ${experimentName}`);
-    setup = experiment.generate();
+    console.log(`Using existing data for experiment: ${experimentName} (${experimentLocation})`);
+    setup = experiment.reuseExistingData();
   }
 
   let aggregatorStack: AggregatorStackConfig | undefined;
@@ -384,7 +388,8 @@ async function runExperimentWithLogs(
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
   experimentDataRoot?: string,
-  logDirectory: string = "./logs/experiments"
+  logDirectory: string = "./logs/experiments",
+  experimentDataLabel?: string
 ): Promise<ExperimentResult[]> {
   const logFilePath = path.resolve(
     logDirectory,
@@ -405,7 +410,8 @@ async function runExperimentWithLogs(
         loggingOptions,
         resourceRegistrationAuthorizedWebId,
         experimentDataRoot,
-        logSink
+        logSink,
+        experimentDataLabel
       )
     );
   } catch (error) {
@@ -426,7 +432,8 @@ async function runExperimentWithRetries(
   loggingOptions?: LoggingOptions,
   resourceRegistrationAuthorizedWebId?: string,
   experimentDataRoot?: string,
-  logDirectory?: string
+  logDirectory?: string,
+  experimentDataLabel?: string
 ): Promise<ExperimentResult[]> {
   let lastError: unknown;
 
@@ -446,7 +453,8 @@ async function runExperimentWithRetries(
           loggingOptions,
           resourceRegistrationAuthorizedWebId,
           experimentDataRoot,
-          logDirectory
+          logDirectory,
+          experimentDataLabel
         );
       }
 
@@ -457,7 +465,9 @@ async function runExperimentWithRetries(
         authorizationMode,
         loggingOptions,
         resourceRegistrationAuthorizedWebId,
-        experimentDataRoot
+        experimentDataRoot,
+        undefined,
+        experimentDataLabel
       );
     } catch (error) {
       lastError = error;
@@ -548,7 +558,8 @@ async function main() {
             loggingOptions,
             resourceRegistrationAuthorizedWebId,
             experimentDataRoot,
-            logDirectory
+            logDirectory,
+            iterationLabel
           );
 
           const resultRunCounts = new Map<string, number>();

@@ -317,6 +317,26 @@ export class ActivitiesPageExperiment extends ElevateDataGenerator implements Ex
     return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
+  reuseExistingData(): ExperimentSetup {
+    const queryUsers: PodContext[] = [];
+    let firstPodContext: PodContext | null = null;
+
+    for (const iteration of this.experimentConfig.iterations) {
+      for (const arg of iteration.args) {
+        const optionValues = Object.values(arg).map(v => String(v).toLowerCase()).join("_");
+        const experimentId = `${iteration.iterationName}-${optionValues}`;
+        const podContext = this.getUserPodContext(this.queryUser, experimentId);
+        queryUsers.push(podContext);
+        firstPodContext ??= podContext;
+      }
+    }
+
+    if (!firstPodContext) {
+      throw new Error("Cannot reuse activities-page data without an experiment iteration.");
+    }
+    return this.finalizeExistingData(firstPodContext, queryUsers);
+  }
+
   private generateProfileCard(experimentId: string): PodContext {
     const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
     const queryUserPodUrl = queryUserContext.baseUrl;

@@ -259,6 +259,20 @@ export class DataGenerator {
     for (const server of this.getServers()) {
       this.generateServerMetadata(server);
     }
+    return this.finalizeExistingData(queryUser, queryUsers);
+  }
+
+  protected finalizeExistingData(queryUser: PodContext, queryUsers: PodContext[] = [ queryUser ]): ExperimentSetup {
+    for (const server of this.getServers()) {
+      if (!fs.existsSync(server.absolutePath)) {
+        throw new Error(`Existing experiment data is missing server directory: ${server.absolutePath}`);
+      }
+    }
+    for (const user of queryUsers) {
+      if (!fs.existsSync(user.absolutePath)) {
+        throw new Error(`Existing experiment data is missing pod directory: ${user.absolutePath}`);
+      }
+    }
     return {
       queryUser,
       queryUsers,

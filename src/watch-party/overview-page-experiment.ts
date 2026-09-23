@@ -350,6 +350,25 @@ export class OverviewPageExperiment extends WatchpartyDataGenerator implements E
     return this.finalizeGeneration(queryUserContext, queryUsers);
   }
 
+  reuseExistingData(): ExperimentSetup {
+    const queryUsers: PodContext[] = [];
+    for (const iteration of this.experimentConfig.iterations) {
+      for (const arg of iteration.args) {
+        const experimentId = `${iteration.iterationName}-${arg.join("_")}`;
+        const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
+        queryUsers.push(queryUserContext);
+        for (let i = 1; i <= arg[0]; i++) {
+          this.getUserPodContext(`user${i}`, experimentId);
+        }
+      }
+    }
+
+    if (queryUsers.length === 0) {
+      throw new Error("Cannot reuse overview-page data without an experiment iteration.");
+    }
+    return this.finalizeExistingData(queryUsers[0], queryUsers);
+  }
+
   private generateForOverviewPage(experimentId: string, numberOfJoinedWatchparties: number): PodContext {
     const queryUserContext = this.getUserPodContext(this.queryUser, experimentId);
     const queryUserPodUrl = queryUserContext.baseUrl;

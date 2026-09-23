@@ -70,6 +70,10 @@ For a smoke test without warmup and with one measured run per benchmark:
 WARMUP_RUNS=0 RECORDED_RUNS=1 npm start
 ```
 
+Set `"useExistingData": true` in the experiment config to keep generated RDF data unchanged across
+retries and authorization modes. Data is stored separately for every iteration argument combination;
+if a combination has no stored data yet, it is generated once and reused by subsequent runs.
+
 ### Solution timeout
 
 Each measured query execution has a wall-clock timeout. The timer starts at `ExperimentResult.startMeasurement()`—after setup, authentication, and local indexed-data preparation. A timed-out worker is terminated; an aggregator request is aborted and awaited before the next run starts. The whole solution is then recorded as timed out (`timedOut: true`) and its other runs are skipped.
