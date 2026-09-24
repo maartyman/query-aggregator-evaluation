@@ -28,8 +28,8 @@ const SelectedColumnsMap: Record<string, {
     sort: { key: "activity_startTime", ascending: true }
   },
   "simple": {
-    keys: ["activity_startTime", "activity_name", "activity_type", "activity_stats_distance",
-      "activity_stats_movingTime"
+    keys: ["activity_startTime", "activity_name", "activity_stats_distance",
+      "activity_stats_movingTime", "activity_stats_elevationGain"
     ],
     filterKeys: [],
     sort: { key: "activity_startTime", ascending: true }
