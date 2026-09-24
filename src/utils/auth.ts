@@ -1,6 +1,5 @@
 import {EventEmitter} from "node:events";
 import {randomUUID} from "node:crypto";
-import {fetch} from 'cross-fetch';
 import {PodContext} from "../data-generator";
 import fsp from 'node:fs/promises';
 import path from 'node:path';
